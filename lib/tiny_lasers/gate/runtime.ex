@@ -33,6 +33,11 @@ defmodule TinyLasers.Gate.Runtime do
   # the built-in error constructors (used by `construct`/`call`/`instanceof`).
   @error_names ~w(Error TypeError RangeError SyntaxError ReferenceError EvalError URIError)
 
+  # static methods on a constructor that code commonly reads as a FIRST-CLASS VALUE (`var f = Array.isArray`);
+  # gated so `typeof Array.somethingElse` stays "undefined".
+  @global_static_methods ~w(isArray from of fromCharCode fromCodePoint raw
+                            isNaN isFinite isInteger isSafeInteger parseFloat parseInt)
+
   # ── run context setup (host-side; called by the driver, never by guest code) ──
 
   @doc "Install the run context (granted caps, tenant FS, output buffer) for this process."
@@ -476,6 +481,10 @@ defmodule TinyLasers.Gate.Runtime do
     do: closure(fn _this, args -> promise_static(k, args) end)
   def oget({:global, "Reflect"}, k) when k in ["get", "set", "has", "ownKeys", "deleteProperty", "getPrototypeOf", "defineProperty", "construct", "apply"],
     do: closure(fn _this, args -> reflect_static(k, args) end)
+  # a constructor's static method read as a first-class value (`var f = Array.isArray; f([1])`) → a closure
+  # bound to the method dispatcher.
+  def oget({:global, name}, k) when is_binary(k) and k in @global_static_methods,
+    do: closure(fn _this, args -> method({:global, name}, k, args) end)
   def oget({:global, _}, _), do: :undefined
 
   def oget({:proto, _}, "toString"), do: {:protom, :tostring}

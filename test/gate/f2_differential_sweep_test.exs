@@ -33,6 +33,10 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"assert-throws-shape", ~S'function t(C, f){ try { f(); return "no"; } catch(x){ return x.constructor === C ? "OK" : "no"; } } print(t(TypeError, function(){ null.x; }));'},
     # String.prototype.match returns null (not undefined) on no-match.
     {"match-null-on-miss", ~S'var m = "abc".match(/z+/); print((m === null) + "," + (null === "abc".match(/(x)(y)/)));'},
+    # global constructor as a value + static method as a value + full error set + uncurry-this.
+    {"statics-as-values", ~S'var f = Array.isArray; var g = Object.getOwnPropertyDescriptor; print(typeof f + "," + f([1]) + "," + typeof g);'},
+    {"uncurry-this", ~S'var j = Function.prototype.call.bind(Array.prototype.join); var h = Function.prototype.call.bind(Object.prototype.hasOwnProperty); print(j([1,2,3]) + "|" + h({a:1}, "a") + "|" + h({a:1}, "b"));'},
+    {"error-hierarchy", ~S'var e = new ReferenceError("x"); print((e instanceof ReferenceError) + "," + (e instanceof Error) + "," + e.name + "," + (e.constructor === ReferenceError));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
