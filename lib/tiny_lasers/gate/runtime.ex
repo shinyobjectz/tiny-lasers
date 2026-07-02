@@ -30,6 +30,9 @@ defmodule TinyLasers.Gate.Runtime do
   run process dies (the BEAM-term-offload model).
   """
 
+  # the built-in error constructors (used by `construct`/`call`/`instanceof`).
+  @error_names ~w(Error TypeError RangeError SyntaxError ReferenceError EvalError URIError)
+
   # ── run context setup (host-side; called by the driver, never by guest code) ──
 
   @doc "Install the run context (granted caps, tenant FS, output buffer) for this process."
@@ -1141,6 +1144,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   def method({keys, map}, "hasOwnProperty", [k | _]) when is_map(map), do: Map.has_key?(map, key_str(k))
+  def method({_keys, map}, "propertyIsEnumerable", [k | _]) when is_map(map), do: Map.has_key?(map, key_str(k))
 
   # user object with a FUNCTION-valued property: `o.f(args)` calls the stored closure (no `this` binding yet).
   def method({_keys, map} = o, name, args) when is_map(map) do
@@ -1152,6 +1156,9 @@ defmodule TinyLasers.Gate.Runtime do
 
   # a mutable-cell instance: `hasOwnProperty`, else a function-valued property is a method with this=the cell.
   def method({:cell, _} = c, "hasOwnProperty", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
+  # every own property is enumerable in F2 (no per-property non-enumerable flag) — used by test262's
+  # propertyHelper `Function.prototype.call.bind(Object.prototype.propertyIsEnumerable)`.
+  def method({:cell, _} = c, "propertyIsEnumerable", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
 
   def method({:cell, id} = c, name, args) do
     coll = Process.get({:gg_cellcoll, id})
@@ -1399,7 +1406,7 @@ defmodule TinyLasers.Gate.Runtime do
   def call({:global, "Array"}, [n]) when is_number(n), do: avec(List.duplicate(:undefined, trunc(n)))
   def call({:global, "Array"}, args), do: avec(args)
   def call({:global, "Object"}, args), do: List.first(args) || olit()
-  def call({:global, err}, args) when err in ["Error", "TypeError", "RangeError", "SyntaxError"], do: construct({:global, err}, args)
+  def call({:global, err}, args) when err in @error_names, do: construct({:global, err}, args)
   # Symbol(desc): a fresh unique symbol. Represented as {:symbol, id, desc}; identity is the id, so two
   # Symbol("x") differ. Usable as an object key (key_str tags it uniquely).
   def call({:global, "Symbol"}, args) do
@@ -1839,7 +1846,7 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
-  def construct({:global, err}, args) when err in ["Error", "TypeError", "RangeError", "SyntaxError"],
+  def construct({:global, err}, args) when err in @error_names,
     do: mk_error(err, to_str(List.first(args) || ""))
 
   # an error object carries its `.constructor` (the global error fn) so `thrown.constructor === TypeError`
@@ -1850,8 +1857,6 @@ defmodule TinyLasers.Gate.Runtime do
     Process.put({:gg_instproto, id}, {:proto, err})
     c
   end
-
-  @error_names ~w(Error TypeError RangeError SyntaxError ReferenceError EvalError URIError)
 
   # `new Array(n)` with a single numeric arg is a length-n hole array (rollup: `new Array(list.length)`),
   # NOT a one-element array containing n.
