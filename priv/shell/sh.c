@@ -19,6 +19,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 /* ---- growable byte buffer (a "stream" between pipeline stages) ---------------------------------- */
 typedef struct { char *p; size_t len, cap; } Buf;
@@ -93,23 +94,19 @@ static void grep_one(const char *path, struct grep_u *base) {
   bfree(&f);
   if (base->list && hit) { bputs(base->out, path); bputc_(base->out, '\n'); }
 }
-/* -r: recurse. The VFS distinguishes files from dirs weakly (opendir() succeeds even
- * on a regular file), so try reading the path as a FILE first — a real file has bytes
- * and is greped directly; only a path that reads empty is treated as a directory to
- * walk. (Subdir readdir depends on runtime fd_readdir honoring the path prefix — see
- * the rider issue; top-level enumeration works today.) */
+/* -r: recurse. stat() authoritatively distinguishes dir (filetype 3 → S_ISDIR) from file,
+ * and fd_readdir honors the opened directory's prefix, so nested subdirs recurse to full
+ * depth. (Avoids the read()/opendir() ambiguity: opendir succeeds even on non-dirs.) */
 static void grep_recurse(const char *path, struct grep_u *base) {
-  Buf f = {0};
-  if (read_file(path, &f) == 0 && f.len > 0) { bfree(&f); grep_one(path, base); return; }
-  bfree(&f);
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) { grep_one(path, base); return; }
   DIR *d = opendir(path);
-  if (!d) { grep_one(path, base); return; }
+  if (!d) return;
   struct dirent *e;
   while ((e = readdir(d))) {
     if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-    if (strcmp(e->d_name, path) == 0) continue;          /* guard: root readdir echoing self */
     char child[1024]; snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-    grep_one(child, base);
+    grep_recurse(child, base);
   }
   closedir(d);
 }

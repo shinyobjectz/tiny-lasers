@@ -2685,6 +2685,10 @@ defmodule TinyLasers.Wasm do
     data =
       cond do
         fd == 0 -> stdin_take(cap)
+        # POSIX read() on a DIRECTORY yields nothing (EISDIR) — enumerate via fd_readdir instead.
+        # (Returning the backing bytes made `cat dir`/`read_file(dir)` look like a non-empty file,
+        # which broke recursive walkers like `grep -r`.)
+        match?(%{kind: :dir}, TinyLasers.Wasm.FdTable.get(fd)) -> ""
         match?(%{kind: :pipe}, TinyLasers.Wasm.FdTable.get(fd)) ->
           %{ref: {pid, _}} = TinyLasers.Wasm.FdTable.get(fd)
           TinyLasers.Wasm.FdTable.Pipe.read(pid, cap)
@@ -3087,9 +3091,9 @@ defmodule TinyLasers.Wasm do
   # list the /work directory: WASI dirents (24-byte header {d_next, d_ino, d_namlen, d_type} + name)
   # streamed from `cookie`, truncated to `buf_len`. `d_next = index+1` lets the guest resume. Previously
   # returned 8 (ENOSYS), so ls / os.listdir / fs.readdir all failed.
-  defp call_host(rt, {_m, "fd_readdir", _t}, [_fd, buf, buf_len, cookie, bufused_ptr]) do
+  defp call_host(_rt, {_m, "fd_readdir", _t}, [fd, buf, buf_len, cookie, bufused_ptr]) do
     stream =
-      readdir_entries()
+      readdir_entries(readdir_prefix(fd))
       |> Enum.with_index()
       |> Enum.drop(cookie)
       |> Enum.map(fn {{name, type}, idx} ->
@@ -3103,16 +3107,43 @@ defmodule TinyLasers.Wasm do
     0
   end
 
-  # the /work entries: top-level files (type 4) + implied dirs from nested keys (type 3), plus . and ..
-  defp readdir_entries do
+  # the directory an open readdir fd refers to, as a VFS key prefix ("" = the /work root).
+  # The fd's desc carries `ref` (the resolved dir path); the preopen (fd 3) is "/work".
+  defp readdir_prefix(fd) do
+    case TinyLasers.Wasm.FdTable.get(fd) do
+      %{kind: :dir, ref: ref} -> normalize_dir_prefix(ref)
+      _ -> ""
+    end
+  end
+
+  defp normalize_dir_prefix(ref) do
+    r =
+      ref
+      |> to_string()
+      |> String.replace_prefix("/work", "")
+      |> String.trim_leading("/")
+      |> String.trim_trailing("/")
+
+    if r in ["", "."], do: "", else: r <> "/"
+  end
+
+  # immediate children under `prefix` ("" = /work root): files (type 4) + implied subdirs (type 3),
+  # honoring the OPENED directory (was: always the root, so `ls`/`grep -r` never saw subdir contents).
+  defp readdir_entries(prefix) do
+    plen = String.length(prefix)
+
     files =
       TinyLasers.Wasm.VFS.list()
+      |> Enum.filter(fn key -> prefix == "" or String.starts_with?(key, prefix) end)
       |> Enum.map(fn key ->
-        case String.split(key, "/", parts: 2) do
+        rest = String.slice(key, plen..-1//1)
+
+        case String.split(rest, "/", parts: 2) do
           [name] -> {name, 4}
           [dir, _] -> {dir, 3}
         end
       end)
+      |> Enum.reject(fn {name, _} -> name == "" end)
       |> Enum.uniq_by(&elem(&1, 0))
       |> Enum.sort()
 
