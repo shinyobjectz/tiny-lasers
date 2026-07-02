@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <dirent.h>
 
 /* ---- growable byte buffer (a "stream" between pipeline stages) ---------------------------------- */
 typedef struct { char *p; size_t len, cap; } Buf;
@@ -62,21 +63,77 @@ static int b_cat(Ctx *c) {
   for (int i = 1; i < c->argc; i++) { Buf f = {0}; if (read_file(c->argv[i], &f) == 0) bput(c->out, f.p, f.len); else { bputs(c->out, "cat: "); bputs(c->out, c->argv[i]); bputs(c->out, ": No such file\n"); rc = 1; } bfree(&f); }
   return rc;
 }
-struct grep_u { const char *pat; Buf *out; int inv; };
+/* case-insensitive substring search (no strcasestr in the wasi libc build) */
+static const char *ci_strstr(const char *hay, const char *needle) {
+  if (!*needle) return hay;
+  for (; *hay; hay++) {
+    const char *h = hay, *n = needle;
+    while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) { h++; n++; }
+    if (!*n) return hay;
+  }
+  return NULL;
+}
+struct grep_u { const char *pat; Buf *out; int inv; int icase; int list; const char *fname; int prefix; int *hitp; };
 static void grep_line(const char *l, size_t n, void *u) {
   struct grep_u *g = u; char *line = strndup(l, n);
-  int hit = strstr(line, g->pat) != NULL;
-  if (hit ^ g->inv) { bput(g->out, l, n); bputc_(g->out, '\n'); }
+  int hit = (g->icase ? ci_strstr(line, g->pat) : strstr(line, g->pat)) != NULL;
   free(line);
+  if (!(hit ^ g->inv)) return;
+  if (g->hitp) *g->hitp = 1;
+  if (g->list) return;                                   /* -l: filename printed by the caller */
+  if (g->prefix && g->fname) { bputs(g->out, g->fname); bputc_(g->out, ':'); }
+  bput(g->out, l, n); bputc_(g->out, '\n');
+}
+/* grep a single file by path; with -l, print the path once if it matched */
+static void grep_one(const char *path, struct grep_u *base) {
+  Buf f = {0};
+  if (read_file(path, &f) != 0) { bfree(&f); return; }
+  int hit = 0; struct grep_u g = *base; g.fname = path; g.hitp = &hit;
+  each_line(&f, grep_line, &g);
+  bfree(&f);
+  if (base->list && hit) { bputs(base->out, path); bputc_(base->out, '\n'); }
+}
+/* -r: recurse. The VFS distinguishes files from dirs weakly (opendir() succeeds even
+ * on a regular file), so try reading the path as a FILE first — a real file has bytes
+ * and is greped directly; only a path that reads empty is treated as a directory to
+ * walk. (Subdir readdir depends on runtime fd_readdir honoring the path prefix — see
+ * the rider issue; top-level enumeration works today.) */
+static void grep_recurse(const char *path, struct grep_u *base) {
+  Buf f = {0};
+  if (read_file(path, &f) == 0 && f.len > 0) { bfree(&f); grep_one(path, base); return; }
+  bfree(&f);
+  DIR *d = opendir(path);
+  if (!d) { grep_one(path, base); return; }
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    if (strcmp(e->d_name, path) == 0) continue;          /* guard: root readdir echoing self */
+    char child[1024]; snprintf(child, sizeof child, "%s/%s", path, e->d_name);
+    grep_one(child, base);
+  }
+  closedir(d);
 }
 static int b_grep(Ctx *c) {
-  int inv = 0, ai = 1;
-  if (ai < c->argc && strcmp(c->argv[ai], "-v") == 0) { inv = 1; ai++; }
+  int inv = 0, icase = 0, rec = 0, list = 0, ai = 1;
+  /* leading option tokens; support combined forms (-ri, -rl, -iv, …) */
+  while (ai < c->argc && c->argv[ai][0] == '-' && c->argv[ai][1] != '\0') {
+    for (const char *p = c->argv[ai] + 1; *p; p++)
+      switch (*p) {
+        case 'v': inv = 1; break;
+        case 'i': icase = 1; break;
+        case 'r': case 'R': rec = 1; break;
+        case 'l': list = 1; break;
+        default: break;                                  /* ignore unknown flags */
+      }
+    ai++;
+  }
   if (ai >= c->argc) { bputs(c->out, "grep: need a pattern\n"); return 2; }
-  struct grep_u g = { c->argv[ai], c->out, inv };
-  /* additional file args: grep over those instead of stdin */
-  if (ai + 1 < c->argc) { for (int i = ai + 1; i < c->argc; i++) { Buf f = {0}; if (read_file(c->argv[i], &f) == 0) each_line(&f, grep_line, &g); bfree(&f); } }
-  else each_line(c->in, grep_line, &g);
+  struct grep_u base = { c->argv[ai], c->out, inv, icase, list, NULL, 0, NULL };
+  int first_file = ai + 1, nfiles = c->argc - first_file;
+  if (nfiles <= 0) { each_line(c->in, grep_line, &base); return 0; }   /* stdin */
+  base.prefix = (nfiles > 1 || rec);                     /* prefix "path:" like real grep */
+  for (int i = first_file; i < c->argc; i++)
+    if (rec) grep_recurse(c->argv[i], &base); else grep_one(c->argv[i], &base);
   return 0;
 }
 struct nlim { int n, seen; Buf *out; };
