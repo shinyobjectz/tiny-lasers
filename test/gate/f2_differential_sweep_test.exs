@@ -61,6 +61,13 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"parse-and-isnan", ~S'print(parseInt("42px") + "," + parseFloat("3.14x") + "," + isNaN(null) + "," + isNaN("5") + "," + isNaN(NaN) + "," + parseInt(true));'},
     {"math-safe", ~S'print(Math.sqrt(-1) + "," + Math.log(0) + "," + Math.round(-1.5) + "," + Math.round(2.5) + "," + (0 ** -1) + "," + Math.log2(8));'},
     {"nan-falsy", ~S'print((!NaN) + "," + Boolean(NaN) + "," + (NaN ? "T" : "F"));'},
+    # Phase 2 dtoa: ECMAScript Number::toString (fixed/exponential thresholds) — matches node exactly.
+    {"dtoa-notation", ~S'print(String(1e30) + "|" + String(1e21) + "|" + String(1e20) + "|" + String(0.0000001) + "|" + String(0.000001) + "|" + String(5e-324));'},
+    {"dtoa-values", ~S'print(String(0.1 + 0.2) + "|" + String(0.5 ** 10) + "|" + String(255 ** 10) + "|" + String(123.456) + "|" + String(-0.5) + "|" + String(1234567890123456800));'},
+    # unicode string ops by code unit (not byte); JSON of NaN/Infinity/undefined; loose-eq object coercion.
+    {"unicode-str", ~S'print("café".at(-1) + "|" + "café".padStart(8, "*") + "|" + "café".length);'},
+    {"json-edge", ~S'print(JSON.stringify(NaN) + "|" + JSON.stringify(Infinity) + "|" + String(JSON.stringify(undefined)) + "|" + JSON.stringify([1, undefined, NaN]));'},
+    {"loose-eq-object", ~S'print(([] == 0) + "," + ([1] == 1) + "," + ("" == 0) + "," + (null == undefined));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},

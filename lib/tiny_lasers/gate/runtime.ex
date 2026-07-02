@@ -1043,9 +1043,11 @@ defmodule TinyLasers.Gate.Runtime do
   def method(s, "charAt", [i | _]) when is_binary(s), do: (if oget(s, i * 1) == :undefined, do: "", else: oget(s, i * 1))
   def method(s, "charAt", _) when is_binary(s), do: binary_part(s, 0, min(1, byte_size(s)))
   def method(s, "at", [i | _]) when is_binary(s) do
+    # index by CODE UNIT, not byte — `"café".at(-1)` is "é", not a raw UTF-8 byte.
+    len = str_len(s)
     idx = trunc(i)
-    idx = if idx < 0, do: byte_size(s) + idx, else: idx
-    if idx >= 0 and idx < byte_size(s), do: binary_part(s, idx, 1), else: :undefined
+    idx = if idx < 0, do: len + idx, else: idx
+    if idx >= 0 and idx < len, do: (String.at(s, idx) || :undefined), else: :undefined
   end
   def method(s, "repeat", [n | _]) when is_binary(s) and is_number(n), do: String.duplicate(s, min(max(trunc(n), 0), 1_000_000))
   def method(s, "repeat", _) when is_binary(s), do: ""
@@ -1527,8 +1529,16 @@ defmodule TinyLasers.Gate.Runtime do
   def call({:globalfn, dec}, [x | _]) when dec in ["decodeURIComponent", "decodeURI"], do: URI.decode(to_str(x))
   def call({:globalfn, _}, _), do: :undefined
 
+  # top-level undefined/function/symbol → the VALUE undefined (String(JSON.stringify(undefined)) is "undefined");
+  # nested, they become "null" (below).
+  defp json_stringify(:undefined, _), do: :undefined
+  defp json_stringify({:fn, _}, _), do: :undefined
+  defp json_stringify({:host, _}, _), do: :undefined
+  defp json_stringify({:symbol, _, _}, _), do: :undefined
   defp json_stringify(v, _rest), do: json_enc(v)
   defp json_enc(n) when is_number(n), do: to_str(n)
+  # NaN / ±Infinity are not valid JSON — serialize as null.
+  defp json_enc(x) when x in [:nan, :infinity, :neg_infinity], do: "null"
   defp json_enc(true), do: "true"
   defp json_enc(false), do: "false"
   defp json_enc(:undefined), do: "null"
@@ -1710,11 +1720,15 @@ defmodule TinyLasers.Gate.Runtime do
   defp str_pad(s, len, rest, side) do
     target = trunc(len)
     pad = case rest do [p | _] -> to_str(p); _ -> " " end
+    # target length is in CODE UNITS, not bytes — `"café".padStart(8, "*")` adds 4 stars (len 4), not 3.
+    slen = str_len(s)
 
-    if byte_size(s) >= target or pad == "" do
+    if slen >= target or pad == "" do
       s
     else
-      fill = String.duplicate(pad, div(target - byte_size(s), byte_size(pad)) + 1) |> binary_part(0, target - byte_size(s))
+      need = target - slen
+      plen = max(str_len(pad), 1)
+      fill = String.duplicate(pad, div(need, plen) + 1) |> String.slice(0, need)
       if side == :leading, do: fill <> s, else: s <> fill
     end
   end
@@ -2386,9 +2400,19 @@ defmodule TinyLasers.Gate.Runtime do
       is_binary(a) and is_number(b) -> (n = to_number(a); is_number(n) and n === b)
       is_boolean(a) -> loose_eq((if a, do: 1.0, else: 0.0), b)
       is_boolean(b) -> loose_eq(a, (if b, do: 1.0, else: 0.0))
+      # object vs primitive: ToPrimitive the object (array → its join string, {} → "[object Object]") and retry
+      # (`[] == 0` is true: "" → 0 == 0).
+      obj?(a) and (is_number(b) or is_binary(b)) -> loose_eq(prim_of(a), b)
+      obj?(b) and (is_number(a) or is_binary(a)) -> loose_eq(a, prim_of(b))
       true -> false
     end
   end
+
+  defp obj?({:arr, _}), do: true
+  defp obj?({:cell, _}), do: true
+  defp obj?(_), do: false
+  defp prim_of({:arr, _} = a), do: to_str(a)
+  defp prim_of({:cell, _} = c), do: to_primitive(c)
 
   defp to_int32(v) do
     n = trunc(num(v))
@@ -2452,9 +2476,52 @@ defmodule TinyLasers.Gate.Runtime do
   def to_str({:bigint, n}), do: Integer.to_string(n)
   def to_str(v) when is_integer(v), do: Integer.to_string(v)
 
-  def to_str(v) when is_float(v) do
-    t = trunc(v)
-    if t == v, do: Integer.to_string(t), else: Float.to_string(v)
+  def to_str(v) when is_float(v), do: js_float_str(v)
+
+  # ECMAScript Number::toString — the shortest round-tripping decimal (Erlang `:short` dtoa) reformatted to JS's
+  # fixed/exponential rules (which differ from Elixir's Float.to_string). E.g. 1e30 → "1e+30" (not the full
+  # integer), 0.0009765625 → fixed (not "9.765625e-4"), 1e21 → "1e+21" but 1e20 → "100000000000000000000".
+  defp js_float_str(v) when v == 0.0, do: "0"
+
+  defp js_float_str(v) do
+    {neg, body} = case :erlang.float_to_binary(v, [:short]) do "-" <> rest -> {true, rest}; s -> {false, s} end
+    {mant, e} = case String.split(body, "e") do [m, ex] -> {m, String.to_integer(ex)}; [m] -> {m, 0} end
+    {int, frac} = case String.split(mant, ".") do [i, f] -> {i, f}; [i] -> {i, ""} end
+    digits0 = int <> frac
+    m0 = String.to_integer(digits0)
+
+    if m0 == 0 do
+      "0"
+    else
+      # value = m0 × 10^p; normalise m0 to have no trailing zeros → significant digits s, point position n.
+      {m, p} = strip_trailing_zeros(m0, String.length(int) + e - String.length(digits0))
+      s = Integer.to_string(m)
+      k = String.length(s)
+      n = p + k
+      out = ecma_notation(s, k, n)
+      if neg, do: "-" <> out, else: out
+    end
+  end
+
+  defp strip_trailing_zeros(m, p) when rem(m, 10) == 0, do: strip_trailing_zeros(div(m, 10), p + 1)
+  defp strip_trailing_zeros(m, p), do: {m, p}
+
+  # `s` = k significant digits, decimal point after `n` (value = s × 10^(n-k)).
+  defp ecma_notation(s, k, n) do
+    cond do
+      # integer with no fractional part, exponent ≤ 21: digits then trailing zeros.
+      n >= k and n <= 21 -> s <> String.duplicate("0", n - k)
+      # a decimal point falls inside the digits.
+      n > 0 and n <= 21 -> String.slice(s, 0, n) <> "." <> String.slice(s, n, k - n)
+      # small magnitude: "0.00…" then the digits.
+      n > -6 and n <= 0 -> "0." <> String.duplicate("0", -n) <> s
+      # everything else: exponential `d[.rest]e±E`, E = n-1.
+      true ->
+        e_out = n - 1
+        first = String.slice(s, 0, 1)
+        mant = if k > 1, do: first <> "." <> String.slice(s, 1, k - 1), else: first
+        mant <> "e" <> (if e_out >= 0, do: "+", else: "-") <> Integer.to_string(abs(e_out))
+    end
   end
 
   def to_str(true), do: "true"
