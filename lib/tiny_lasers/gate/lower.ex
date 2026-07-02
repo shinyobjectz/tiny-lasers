@@ -979,33 +979,27 @@ defmodule TinyLasers.Gate.Lower do
     # once and mutates shared sub-objects that were copied by reference via Object.assign). So every object
     # literal is a mutable cell. Per-run process isolation reclaims the cell table when the run process dies.
     has_spread = Enum.any?(props, &(&1["type"] == "SpreadElement"))
+    has_accessor = Enum.any?(props, &(&1["kind"] in ["get", "set"]))
 
-    if not has_spread do
+    if not has_spread and not has_accessor do
+      # fast path: a plain data-bag object → one cell_new with all key/value pairs.
       pairs =
-        props
-        |> Enum.reject(&(&1["kind"] == "set"))
-        |> Enum.map(fn p ->
+        Enum.map(props, fn p ->
           kq = if p["computed"], do: expr(p["key"], scope), else: key_of(p["key"])
-          # accessor property `{ get x() {…} }` — a getter MARKER, invoked on read by cell_oget.
-          if p["kind"] == "get",
-            do: quote(do: {unquote(kq), {:getter, unquote(expr(p["value"], scope))}}),
-            else: quote(do: {unquote(kq), unquote(expr(p["value"], scope))})
+          quote(do: {unquote(kq), unquote(expr(p["value"], scope))})
         end)
 
       quote(do: unquote(@runtime).cell_new(unquote(pairs)))
     else
-      # spread: start from an empty cell and merge/set each property in order.
+      # accessors or spread present: build in property ORDER (spread merges, get/set install/merge accessors).
       Enum.reduce(props, quote(do: unquote(@runtime).cell_new([])), fn p, acc ->
         case p do
           %{"type" => "SpreadElement", "argument" => a} ->
             quote(do: unquote(@runtime).omerge(unquote(acc), unquote(expr(a, scope))))
 
-          %{"kind" => "get", "key" => k, "value" => v} = pg ->
-            kq = if pg["computed"], do: expr(k, scope), else: key_of(k)
-            quote(do: unquote(@runtime).oput(unquote(acc), unquote(kq), {:getter, unquote(expr(v, scope))}))
-
-          %{"kind" => "set"} ->
-            acc
+          %{"kind" => kind, "key" => k, "value" => v} when kind in ["get", "set"] ->
+            kq = if p["computed"], do: expr(k, scope), else: key_of(k)
+            quote(do: unquote(@runtime).put_accessor(unquote(acc), unquote(kq), unquote(kind), unquote(expr(v, scope))))
 
           %{"key" => k, "value" => v, "computed" => computed} ->
             kq = if computed, do: expr(k, scope), else: key_of(k)

@@ -172,7 +172,28 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   @doc "Property write. A cell mutates in place (shared); an immutable object returns a NEW object."
-  def oput({:cell, _} = c, k, v), do: cell_put(c, k, v)
+  # a property backed by an ACCESSOR routes the write through its SETTER (`this` = the cell); a getter-only
+  # accessor makes the write a silent no-op (JS sloppy mode). Non-accessor properties store normally.
+  def oput({:cell, _} = c, k, v) do
+    case accessor_setter(raw_prop(c, k)) do
+      :none ->
+        # no OWN accessor — a setter on the PROTOTYPE chain still catches the write (class accessors live on
+        # the prototype), invoked with `this` = this instance; a prototype getter-only accessor makes the
+        # instance write a silent no-op (sloppy mode). Only walked when the cell has a prototype.
+        case proto_setter(c, key_str(k)) do
+          :none -> cell_put(c, k, v)
+          :readonly -> c
+          s -> invoke(s, c, [v]); c
+        end
+
+      :readonly ->
+        c
+
+      s ->
+        invoke(s, c, [v])
+        c
+    end
+  end
   # element write on a typed array mutates the backing buffer and returns the ARRAY — Lower's member-assignment
   # rebinds the root identifier to oput's return, so returning the value would clobber the variable (the
   # rollup native-bridge `u8[i] = buf[i]` loop hit exactly this).
@@ -203,8 +224,17 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   # functions are objects: `marked.parse = fn`, `marked.Lexer = ...`. Properties live in a per-function table
-  # keyed by the closure identity (mutation is shared, like a cell). Returns the function.
-  def oput({:fn, f} = fnv, k, v) do
+  # keyed by the closure identity (mutation is shared, like a cell). Returns the function. A property backed by
+  # an accessor setter routes the write through it (static class setters live on the class function object).
+  def oput({:fn, _} = fnv, k, v) do
+    case accessor_setter(raw_prop(fnv, k)) do
+      :none -> fn_put_raw(fnv, k, v)
+      :readonly -> fnv
+      s -> invoke(s, fnv, [v]); fnv
+    end
+  end
+
+  defp fn_put_raw({:fn, f} = fnv, k, v) do
     k = key_str(k)
     props = Process.get(:gg_fnprops, %{})
     {keys, map} = Map.get(props, f, {[], %{}})
@@ -274,13 +304,74 @@ defmodule TinyLasers.Gate.Runtime do
       {:getter, f} ->
         invoke(f, recv, [])
 
+      {:accessor, :undefined, _} ->
+        :undefined
+
+      {:accessor, g, _} ->
+        invoke(g, recv, [])
+
       v ->
         v
     end
   end
 
   defp deget({:getter, f}, recv), do: invoke(f, recv, [])
+  defp deget({:accessor, :undefined, _}, _recv), do: :undefined
+  defp deget({:accessor, g, _}, recv), do: invoke(g, recv, [])
   defp deget(v, _recv), do: v
+
+  # ── accessor properties: {:accessor, get, set} (get/set are fn-values or :undefined). {:getter, f} is the
+  # legacy get-only alias, treated the same. `accessor_setter/1` reports what a WRITE should do.
+  defp accessor_setter({:accessor, _g, :undefined}), do: :readonly
+  defp accessor_setter({:accessor, _g, s}), do: s
+  defp accessor_setter({:getter, _}), do: :readonly
+  defp accessor_setter(_), do: :none
+
+  # walk the prototype chain for an accessor whose setter catches an instance write. :none = no accessor found
+  # (write proceeds to an own property); a value = the setter fn; :readonly = getter-only (write is a no-op).
+  defp proto_setter({:cell, id}, kstr) do
+    case Process.get({:gg_instproto, id}) do
+      nil ->
+        :none
+
+      {:cell, _} = proto ->
+        case accessor_setter(raw_prop(proto, kstr)) do
+          :none -> proto_setter(proto, kstr)
+          found -> found
+        end
+
+      proto ->
+        accessor_setter(raw_prop(proto, kstr))
+    end
+  end
+
+  defp proto_setter(_, _), do: :none
+
+  @doc "RAW property read — returns the STORED value/marker (an accessor is NOT invoked). Used by
+  defineProperty (to merge get+set) and by the setter-aware write path."
+  def raw_prop({:cell, _} = c, k), do: Map.get(cell_read(c) |> elem(1), key_str(k), :undefined)
+  def raw_prop({:fn, f}, k), do: Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.get(key_str(k), :undefined)
+  def raw_prop({keys, map}, k) when is_list(keys) and is_map(map), do: Map.get(map, key_str(k), :undefined)
+  def raw_prop(_, _), do: :undefined
+
+  @doc "RAW property store — bypasses accessor-setter invocation (installs the marker itself)."
+  def raw_put({:cell, _} = c, k, v), do: cell_put(c, k, v)
+  def raw_put({:fn, _} = f, k, v), do: fn_put_raw(f, k, v)
+  def raw_put(o, k, v), do: oput(o, k, v)
+
+  @doc "Install/merge an accessor half. `kind` is \"get\" or \"set\"; merges with any existing accessor at the
+  key so `{ get x(){}, set x(v){} }` (two properties, same key) becomes one `{:accessor, g, s}`. Returns obj."
+  def put_accessor(obj, key, kind, fun) do
+    {g, s} =
+      case raw_prop(obj, key) do
+        {:accessor, cg, cs} -> {cg, cs}
+        {:getter, cg} -> {cg, :undefined}
+        _ -> {:undefined, :undefined}
+      end
+
+    raw_put(obj, key, if(kind == "get", do: {:accessor, fun, s}, else: {:accessor, g, fun}))
+    obj
+  end
 
   # a function's `.prototype` is a stable per-function cell (ES5 method bag: `Ctor.prototype.m = fn`).
   def oget({:fn, _} = fnv, "prototype"), do: fn_proto(fnv)
@@ -288,6 +379,8 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:fn, f} = fnv, k) do
     case Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.get(key_str(k), :undefined) do
       {:getter, g} -> invoke(g, fnv, [])
+      {:accessor, :undefined, _} -> :undefined
+      {:accessor, g, _} -> invoke(g, fnv, [])
       v -> v
     end
   end
@@ -449,7 +542,9 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "Functional index/key write. Arrays grow to fit; objects add the key. Returns a NEW term."
   def oput_idx({:arr, _} = a, i, v), do: arr_put(a, i, v)
-  def oput_idx({:cell, _} = c, k, v), do: cell_put(c, k, v)
+  # a cell member write goes through the accessor-aware `oput` (Lower's `o.x = v` rebind lowers to oput_idx —
+  # it must invoke a setter, not raw-store past it).
+  def oput_idx({:cell, _} = c, k, v), do: oput(c, k, v)
   def oput_idx({:globalobj}, k, v), do: oput({:globalobj}, k, v)
   def oput_idx(other, k, v), do: oput(other, k, v)
 
@@ -1170,12 +1265,31 @@ defmodule TinyLasers.Gate.Runtime do
   end
   defp object_static("freeze", [o | _]), do: o
   # defineProperty: set `value` if the descriptor carries one (Babel `_createClass` method attach); a
-  # value-less descriptor (`{writable:false}` on `Ctor.prototype`) must NOT clobber the existing property.
+  # value-less descriptor (`{writable:false}` on `Ctor.prototype`) must NOT clobber the existing property. A
+  # get/set descriptor installs an `{:accessor, get, set}`, MERGING with an existing accessor (separate
+  # `defineProperty(o,k,{get})` then `{set}` calls build one accessor). Stored RAW so installing the setter
+  # itself doesn't re-enter the write path.
   defp object_static("defineProperty", [o, k, desc | _]) do
+    ks = to_str(k)
+
     cond do
-      has_own(desc, "value") -> oput(o, to_str(k), oget(desc, "value"))
-      has_own(desc, "get") -> oput(o, to_str(k), {:getter, oget(desc, "get")})
-      true -> o
+      has_own(desc, "value") ->
+        oput(o, ks, oget(desc, "value"))
+
+      has_own(desc, "get") or has_own(desc, "set") ->
+        {cg, cs} =
+          case raw_prop(o, ks) do
+            {:accessor, g, s} -> {g, s}
+            {:getter, g} -> {g, :undefined}
+            _ -> {:undefined, :undefined}
+          end
+
+        ng = if has_own(desc, "get"), do: oget(desc, "get"), else: cg
+        ns = if has_own(desc, "set"), do: oget(desc, "set"), else: cs
+        raw_put(o, ks, {:accessor, ng, ns})
+
+      true ->
+        o
     end
   end
   # Object.defineProperties(o, { k1: desc1, k2: desc2, … }) — acorn installs its getter properties this way.

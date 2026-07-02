@@ -136,7 +136,17 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     # `t()` walker and `sP()`): a shared registry key clobbers across re-entrant invocations, so these MUST bind
     # a fresh box each evaluation. The nested-closure capture + re-entrancy is the exact shape that failed.
     {"nfe-reentrant-capture", ~S'function walk(node, visit) { var self = function w(n) { var acc = []; if (n.kids) for (var k of n.kids) acc.push(w(k)); return visit(n) + "[" + acc.join(",") + "]"; }; return self(node); } var count = function label(x) { return x.c ? "N" + label(x.c) : "L"; }; print(walk({ v: "a", kids: [{ v: "b" }, { v: "c", kids: [{ v: "d" }] }] }, function(n) { return n.v; }) + "|" + count({ c: { c: {} } }));'},
-    {"nested-fndecl-reentrant", ~S'function outer(depth, acc) { var items = []; function push(x) { items.push(x); } function build() { push("d" + depth); if (depth > 0) outer(depth - 1, items); return items; } build(); if (acc) for (var it of items) acc.push(it); return items.length; } print(outer(2, null));'}
+    {"nested-fndecl-reentrant", ~S'function outer(depth, acc) { var items = []; function push(x) { items.push(x); } function build() { push("d" + depth); if (depth > 0) outer(depth - 1, items); return items; } build(); if (acc) for (var it of items) acc.push(it); return items.length; } print(outer(2, null));'},
+
+    # accessor properties: object-literal + class get/set, setter invocation, getter-only no-op, defineProperty
+    # get+set merge, prototype-chain (class/inherited) setters, static accessors.
+    {"objlit-get-set", ~S'var o = { _x: 1, get x() { return this._x; }, set x(v) { this._x = v * 2; } }; var a = o.x; o.x = 5; print(a + "," + o.x + "," + o._x);'},
+    {"class-get-set", ~S'class C { constructor() { this._n = 0; } get n() { return this._n; } set n(v) { this._n = v + 100; } } var c = new C(); c.n = 5; print(c.n + "," + c._n);'},
+    {"setter-only", ~S'var cap = null; var o = { set val(v) { cap = "got:" + v; } }; o.val = 42; print(cap + "|" + (o.val === undefined));'},
+    {"getter-only-write-noop", ~S'var o = { get x() { return 7; } }; o.x = 99; print(o.x);'},
+    {"defineProperty-get-then-set", ~S'var s = 0; var o = {}; Object.defineProperty(o, "p", { get: function() { return s; } }); Object.defineProperty(o, "p", { set: function(v) { s = v + 1; } }); o.p = 10; print(o.p);'},
+    {"inherited-setter", ~S'class Base { set val(v) { this._v = v * 3; } get val() { return this._v; } } class Sub extends Base {} var s = new Sub(); s.val = 4; print(s.val);'},
+    {"static-accessor-set", ~S'class C { static get mode() { return C._m || "d"; } static set mode(v) { C._m = "set:" + v; } } C.mode = "prod"; print(C.mode);'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do

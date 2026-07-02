@@ -272,12 +272,11 @@ defmodule TinyLasers.Gate.Walk do
     Enum.reduce(props, Runtime.cell_new([]), fn p, acc ->
       case p do
         %{"type" => "SpreadElement", "argument" => a} -> Runtime.omerge(acc, eval(a, env))
-        # accessor property `{ get x() {…} }` — install a getter marker (cell_oget invokes it on read).
-        # Setters are stored as plain fns only to keep the key visible; property WRITES shadow them (v0 limit).
-        %{"kind" => "get", "key" => k, "value" => v} ->
+        # accessor property `{ get x(){…} }` / `{ set x(v){…} }` — install/merge an accessor marker (reads
+        # invoke the getter; writes route through the setter). A key with both get and set merges into one.
+        %{"kind" => kind, "key" => k, "value" => v} when kind in ["get", "set"] ->
           key = if p["computed"], do: eval(k, env), else: key_of(k)
-          Runtime.oput(acc, key, {:getter, eval(v, env)})
-        %{"kind" => "set"} -> acc
+          Runtime.put_accessor(acc, key, kind, eval(v, env))
         %{"key" => k, "value" => v, "computed" => computed} ->
           key = if computed, do: eval(k, env), else: key_of(k)
           Runtime.oput(acc, key, eval(v, env))
