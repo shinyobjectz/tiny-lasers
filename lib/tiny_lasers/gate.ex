@@ -106,27 +106,45 @@ defmodule TinyLasers.Gate do
     }
   end
 
+  # host-safe defaults for bounding guest execution. 512 MB heap is generous for real bundles (rollup/linkedom
+  # runs sit well under it) yet far below host RAM, so an allocating runaway is KILLED long before it can OOM the
+  # machine. 30 s wall-clock kills a spinning (non-allocating) loop. Both are overridable per run.
+  @default_max_heap_words 67_108_864
+  @default_run_timeout 30_000
+
   @doc """
-  Run in an isolated process: `max_heap_size{kill}` + wall-clock timeout + monitor.
-  A guest that loops or allocates forever is contained without harming the caller.
-  Returns {:completed, %{...}} | {:timeout} | {:killed, reason} | {:down, reason}.
+  THE mandatory way to execute guest code: run `fun` (0-arity) in an isolated process bounded by BOTH
+  `max_heap_size{kill}` AND a wall-clock timeout, monitored. A guest that loops or allocates forever is killed —
+  it **cannot** exhaust the host. Never `apply` a compiled guest module directly in a host-critical process;
+  route it through here (or `run_isolated`).
+
+  `fun` runs in the child, so it must do everything guest-side (init runtime, register sibling modules, apply
+  the guest, capture `Runtime.__output()`) and RETURN what the caller needs — the child's process state is not
+  visible to the parent. Returns `{:completed, fun_result} | {:timeout} | {:killed, :max_heap_size} | {:down, reason}`.
   """
-  def run_isolated(compiled, opts \\ []) do
+  def bounded(fun, opts \\ []) when is_function(fun, 0) do
     parent = self()
     ref = make_ref()
-    max_heap = Keyword.get(opts, :max_heap_size, 2_000_000)
-    timeout = Keyword.get(opts, :timeout, 1_000)
+    max_heap = Keyword.get(opts, :max_heap_size, @default_max_heap_words)
+    timeout = Keyword.get(opts, :timeout, @default_run_timeout)
 
     {pid, mon} =
       :erlang.spawn_opt(
-        fn -> send(parent, {ref, run(compiled, opts)}) end,
-        [:monitor, {:max_heap_size, %{size: max_heap, kill: true, error_logger: false}}]
+        fn -> send(parent, {ref, fun.()}) end,
+        [
+          :monitor,
+          # include_shared_binaries (OTP 27+): count OFF-HEAP refc binaries toward the limit. Without it a guest
+          # that builds large strings (`"x".repeat(1e5)` in a loop — big binaries live off-heap) would evade the
+          # heap kill and OOM the host before the wall-clock timeout. THIS closes the binary-bomb vector.
+          {:max_heap_size, %{size: max_heap, kill: true, error_logger: false, include_shared_binaries: true}},
+          {:message_queue_data, :off_heap}
+        ]
       )
 
     receive do
-      {^ref, out} ->
+      {^ref, res} ->
         Process.demonitor(mon, [:flush])
-        {:completed, out}
+        {:completed, res}
 
       {:DOWN, ^mon, :process, ^pid, :killed} ->
         {:killed, :max_heap_size}
@@ -144,6 +162,44 @@ defmodule TinyLasers.Gate do
         end
 
         {:timeout}
+    end
+  end
+
+  @doc """
+  Run a single compiled guest module in a bounded isolated process (see `bounded/2`).
+  Returns {:completed, %{result, output, fs_writes}} | {:timeout} | {:killed, reason} | {:down, reason}.
+  """
+  def run_isolated(compiled, opts \\ []), do: bounded(fn -> run(compiled, opts) end, opts)
+
+  @doc """
+  Run a compiled F2 guest (a `main` module plus zero or more `sibling` modules from the multi-module explode
+  path) in a BOUNDED isolated process, returning `{status, output_lines}` where status is
+  `:completed | :timeout | {:killed, reason} | {:down, reason}`. Registers the siblings and applies `main.run`
+  in the child (Runtime state is per-process), drains microtasks, and returns `Runtime.__output()`.
+
+  This is what every harness/test MUST use instead of `apply(mod, :run, [])` — a guest that loops or allocates
+  forever is killed, never the host. `ctx` is the `Runtime.__init` context (caps/fs/tenant_root).
+  """
+  def bounded_run(main_mod, sibling_mods, ctx, opts \\ []) do
+    res =
+      bounded(
+        fn ->
+          Runtime.__init(ctx)
+          Enum.each(sibling_mods, fn m -> apply(m, :__gg_register, []) end)
+          try do
+            apply(main_mod, :run, [])
+            Runtime.drain_microtasks()
+          catch
+            :throw, _ -> :ok
+          end
+          Runtime.__output()
+        end,
+        opts
+      )
+
+    case res do
+      {:completed, output} -> {:completed, output}
+      other -> other
     end
   end
 

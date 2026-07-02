@@ -485,6 +485,15 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
+  # String.prototype methods as first-class VALUES — `const {replace} = ""; replace.call(es, …)` (linkedom's
+  # serializer) reads the method off a string and calls it with an explicit receiver. The closure binds `this`
+  # at call time (via .call/.apply or direct invoke), so `method(this, name, args)` dispatches to the real one.
+  @str_methods ~w(at charAt charCodeAt codePointAt concat endsWith includes indexOf lastIndexOf match matchAll
+                  normalize padEnd padStart repeat replace replaceAll search slice split startsWith substr
+                  substring toLowerCase toString toUpperCase trim trimEnd trimLeft trimRight trimStart valueOf)
+  def oget(s, k) when is_binary(s) and is_binary(k) and k in @str_methods,
+    do: closure(fn this, args -> method(this, k, args) end)
+
   @doc "global namespace/property reads (Math.PI, Number.MAX_VALUE, Object.prototype)."
   # Math functions callable as first-class VALUES (GSAP/easing libs alias `var _sin = Math.sin; _sin(x)`).
   @math_fns ~w(floor ceil round trunc abs sqrt cbrt pow sin cos tan asin acos atan atan2 sinh cosh tanh exp

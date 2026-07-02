@@ -55,36 +55,39 @@ defmodule TinyLasers.Gate.Js do
 
     ctx = %{caps: caps, tenant_root: "/tenant", fs: %{}}
 
-    parent = self()
+    # Execute in a MEMORY- and TIME-bounded isolated process. A guest that allocates or loops forever is killed
+    # (max_heap_size{kill} / wall-clock) — it can NEVER exhaust the host. Compilation already happened above (a
+    # finite, host-controlled step); only the arbitrary guest RUN is sandboxed here.
+    bounded =
+      TinyLasers.Gate.bounded(
+        fn ->
+          Runtime.__init(ctx)
 
-    pid =
-      spawn(fn ->
-        Runtime.__init(ctx)
+          res =
+            try do
+              r = {:ok, apply(mod, :run, [])}
+              Runtime.drain_microtasks()
+              r
+            catch
+              # an uncaught guest `throw` (incl. a TypeError from null/undefined access) is a GUEST error, not a
+              # host crash — the thrown value never escaped the confined term domain.
+              :throw, {:gg_throw, v} -> {:guest_error, v}
+              :throw, {:gg_guest_error, r} -> {:guest_error, r}
+              :throw, {:gg_return, v} -> {:ok, v}
+              kind, e -> {:crash, kind, e}
+            end
 
-        res =
-          try do
-            r = {:ok, apply(mod, :run, [])}
-            Runtime.drain_microtasks()
-            r
-          catch
-            # an uncaught guest `throw` (incl. a TypeError from null/undefined access) is a GUEST error, not a
-            # host crash — the thrown value never escaped the confined term domain.
-            :throw, {:gg_throw, v} -> {:guest_error, v}
-            :throw, {:gg_guest_error, r} -> {:guest_error, r}
-            :throw, {:gg_return, v} -> {:ok, v}
-            kind, e -> {:crash, kind, e}
-          end
+          {res, Runtime.__output()}
+        end,
+        max_heap_size: Keyword.get(opts, :max_heap_size, 67_108_864),
+        timeout: Keyword.get(opts, :timeout, 10_000)
+      )
 
-        send(parent, {:done, res, Runtime.__output()})
-      end)
-
-    _ = pid
-
-    receive do
-      {:done, res, output} ->
-        %{result: res, output: output, binary: bin, mod: mod}
-    after
-      Keyword.get(opts, :timeout, 10_000) -> (Process.exit(pid, :kill); %{result: {:timeout, nil}, output: [], binary: bin, mod: mod})
+    case bounded do
+      {:completed, {res, output}} -> %{result: res, output: output, binary: bin, mod: mod}
+      {:timeout} -> %{result: {:timeout, nil}, output: [], binary: bin, mod: mod}
+      {:killed, reason} -> %{result: {:resource_killed, reason}, output: [], binary: bin, mod: mod}
+      {:down, reason} -> %{result: {:crash, :down, reason}, output: [], binary: bin, mod: mod}
     end
   end
 
