@@ -40,9 +40,16 @@ defmodule TinyLasers.Gate.F2PreactTest do
     golden = File.read!(Path.join(@conf, "preact/preact_golden.html")) |> String.trim()
     ast = Js.parse(prelude <> "\n" <> bundle)
 
-    # ── interpreter lane ──
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    walk_out = try do Walk.run(ast, %{"print" => 0}); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    # ── interpreter lane (BOUNDED: memory + wall-clock; a runaway guest is killed, never the test host) ──
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+
+    {:completed, walk_out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        try do Walk.run(ast, %{"print" => 0}) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 120_000, max_heap_size: 134_217_728)
+
     assert String.trim(extract(walk_out)) == golden, "interpreter Preact render diverged from node golden"
 
     # ── compiled lane: confined + byte-identical ──
@@ -52,8 +59,7 @@ defmodule TinyLasers.Gate.F2PreactTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled Preact module not confined"
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    try do apply(m, :run, []) catch :throw, _ -> :ok end
-    assert String.trim(extract(Runtime.__output())) == golden, "compiled lane Preact render diverged from node golden"
+    {:completed, out} = TinyLasers.Gate.bounded_run(m, [], ctx, timeout: 120_000, max_heap_size: 134_217_728)
+    assert String.trim(extract(out)) == golden, "compiled lane Preact render diverged from node golden"
   end
 end

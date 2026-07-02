@@ -27,8 +27,8 @@ defmodule TinyLasers.Gate.F2MagicStringCorpusTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin)
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    got = try do apply(m, :run, []); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+    {:completed, got} = TinyLasers.Gate.bounded_run(m, [], ctx, timeout: 120_000, max_heap_size: 134_217_728)
 
     # join with newlines and compare to the raw golden — one case (`indent`) legitimately contains an embedded
     # newline, so line-splitting would falsely fragment it. The full text must match the golden byte-for-byte.

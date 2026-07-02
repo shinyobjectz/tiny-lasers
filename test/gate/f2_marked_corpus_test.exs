@@ -22,11 +22,6 @@ defmodule TinyLasers.Gate.F2MarkedCorpusTest do
     # confinement: the compiled marked engine references ONLY the Runtime (no host module, no dangerous BIF).
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin)
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    try do apply(m, :run, []) catch :throw, _ -> :ok end
-    parse = Runtime.oget(Runtime.oget({:globalobj}, "marked"), "parse")
-    assert match?({:fn, _}, parse), "marked.parse must be a function"
-
     cases =
       Regex.scan(~r/show\("([^"]+)",\s*"((?:[^"\\]|\\.)*)"\)/, File.read!(Path.join(@conf, "marked_corpus.js")))
       |> Enum.map(fn [_, l, md] -> {l, md} end)
@@ -36,9 +31,29 @@ defmodule TinyLasers.Gate.F2MarkedCorpusTest do
       |> String.split("\n", trim: true)
       |> Map.new(fn line -> line |> String.split("=", parts: 2) |> List.to_tuple() end)
 
-    for {label, md_raw} <- cases do
-      md = md_raw |> String.replace("\\n", "\n") |> String.replace("\\\"", "\"") |> String.replace("\\\\", "\\")
-      html = Runtime.call(parse, [md])
+    # BOUNDED: marked.parse closes over child-process state, so run + all parse() calls happen in ONE bounded
+    # process (a runaway is killed, never the test host). Only the label→html results come back to assert on.
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+
+    {:completed, {parse_ok, results}} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        try do apply(m, :run, []) catch :throw, _ -> :ok end
+        parse = Runtime.oget(Runtime.oget({:globalobj}, "marked"), "parse")
+
+        results =
+          for {label, md_raw} <- cases, into: %{} do
+            md = md_raw |> String.replace("\\n", "\n") |> String.replace("\\\"", "\"") |> String.replace("\\\\", "\\")
+            {label, Runtime.call(parse, [md])}
+          end
+
+        {match?({:fn, _}, parse), results}
+      end, timeout: 120_000, max_heap_size: 134_217_728)
+
+    assert parse_ok, "marked.parse must be a function"
+
+    for {label, _} <- cases do
+      html = results[label]
       assert is_binary(html), "#{label}: parse returned #{inspect(html)}"
       assert json(html) == golden[label], "#{label} mismatch"
     end

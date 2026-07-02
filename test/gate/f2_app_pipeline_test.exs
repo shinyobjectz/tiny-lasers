@@ -16,6 +16,7 @@ defmodule TinyLasers.Gate.F2AppPipelineTest do
   """
   use ExUnit.Case, async: false
 
+  alias TinyLasers.Gate
   alias TinyLasers.Gate.{Js, Lower, Runtime, Walk}
 
   @conf "test/conformance"
@@ -38,9 +39,14 @@ defmodule TinyLasers.Gate.F2AppPipelineTest do
     granted = %{"print" => 0, "__host" => 1}
     caps = %{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}}
 
-    # interpreter
-    Runtime.__init(caps)
-    walk_out = try do Walk.run(ast, granted); Runtime.drain_microtasks(); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    # interpreter — BOUNDED (memory + wall-clock capped; a runaway guest is killed, never the test host)
+    {:completed, walk_out} =
+      Gate.bounded(fn ->
+        Runtime.__init(caps)
+        try do Walk.run(ast, granted); Runtime.drain_microtasks() catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
+
     assert extract(walk_out, "APP_BUILD_OK") == golden, "interpreter build diverged from native rollup"
 
     # compiled: parallel multi-module (the 1.27MB bundle), every module confined
@@ -60,10 +66,9 @@ defmodule TinyLasers.Gate.F2AppPipelineTest do
     for {tag, _, bin} <- mods, do: assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "module #{tag} not confined"
 
     {:main, main, _} = List.keyfind(mods, :main, 0)
-    Runtime.__init(caps)
-    for {tag, m, _} <- mods, tag != :main, do: apply(m, :__gg_register, [])
-    try do apply(main, :run, []); Runtime.drain_microtasks() catch :throw, _ -> :ok end
-    assert extract(Runtime.__output(), "APP_BUILD_OK") == golden, "compiled build diverged from native rollup"
+    sibs = for {tag, m, _} <- mods, tag != :main, do: m
+    {:completed, build_out} = Gate.bounded_run(main, sibs, caps, timeout: 180_000, max_heap_size: 268_435_456)
+    assert extract(build_out, "APP_BUILD_OK") == golden, "compiled build diverged from native rollup"
   end
 
   @tag timeout: 600_000
@@ -74,8 +79,15 @@ defmodule TinyLasers.Gate.F2AppPipelineTest do
     golden = File.read!(Path.join(@conf, "app/ssr_golden.html")) |> String.trim()
     ast = Js.parse(console <> prelude <> "\n" <> ssr)
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    walk_out = try do Walk.run(ast, %{"print" => 0}); Runtime.drain_microtasks(); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    ssr_ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+
+    {:completed, walk_out} =
+      Gate.bounded(fn ->
+        Runtime.__init(ssr_ctx)
+        try do Walk.run(ast, %{"print" => 0}); Runtime.drain_microtasks() catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 120_000, max_heap_size: 134_217_728)
+
     assert extract(walk_out, "APP_SSR_OK") == golden, "interpreter SSR diverged from node"
 
     body = Lower.program(ast, %{"print" => 0})
@@ -83,8 +95,7 @@ defmodule TinyLasers.Gate.F2AppPipelineTest do
     [{m, bin}] = Code.compile_quoted(quote do (defmodule unquote(mod) do def run, do: unquote(body) end) end)
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled SSR module not confined"
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    try do apply(m, :run, []); Runtime.drain_microtasks() catch :throw, _ -> :ok end
-    assert extract(Runtime.__output(), "APP_SSR_OK") == golden, "compiled SSR diverged from node"
+    {:completed, ssr_out} = Gate.bounded_run(m, [], ssr_ctx, timeout: 120_000, max_heap_size: 134_217_728)
+    assert extract(ssr_out, "APP_SSR_OK") == golden, "compiled SSR diverged from node"
   end
 end

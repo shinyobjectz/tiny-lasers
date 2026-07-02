@@ -34,8 +34,14 @@ defmodule TinyLasers.Gate.F2SvelteTest do
     golden = File.read!(Path.join(@conf, "svelte/svelte_golden.txt")) |> String.replace_prefix("5.56.4|", "")
 
     # ── interpreter lane: byte-identical ──
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    walk_out = try do Walk.run(ast, %{"print" => 0}); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    walk_ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+
+    {:completed, walk_out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(walk_ctx)
+        try do Walk.run(ast, %{"print" => 0}) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
     walk_ok = Enum.find(walk_out, &String.starts_with?(&1, "SVELTE_OK["))
     assert walk_ok, "interpreter produced no SVELTE_OK; out=#{inspect(Enum.take(walk_out, 4))}"
     walk_code = walk_ok |> String.replace_prefix("SVELTE_OK[", "") |> String.replace_prefix("5.56.4|", "") |> String.replace_suffix("]", "")
@@ -64,10 +70,16 @@ defmodule TinyLasers.Gate.F2SvelteTest do
 
     # compiled lane: byte-identical to the golden.
     {:main, main, _} = List.keyfind(mods, :main, 0)
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    for {tag, m, _} <- mods, tag != :main, do: apply(m, :__gg_register, [])
-    try do apply(main, :run, []) catch :throw, _ -> :ok end
-    comp_out = Runtime.__output()
+    comp_ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+    sibs = for {tag, m, _} <- mods, tag != :main, do: m
+
+    {:completed, comp_out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(comp_ctx)
+        Enum.each(sibs, fn s -> apply(s, :__gg_register, []) end)
+        try do apply(main, :run, []) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
     comp_ok = Enum.find(comp_out, &String.starts_with?(&1, "SVELTE_OK["))
     assert comp_ok, "compiled lane produced no SVELTE_OK; out=#{inspect(Enum.take(comp_out, 4))}"
     comp_code = comp_ok |> String.replace_prefix("SVELTE_OK[", "") |> String.replace_prefix("5.56.4|", "") |> String.replace_suffix("]", "")

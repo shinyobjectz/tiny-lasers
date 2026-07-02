@@ -62,8 +62,14 @@ defmodule TinyLasers.Gate.F2RollupScaleTest do
     assert length(golden) == 65, "golden should have 65 chunks (64 entries + shared common), got #{length(golden)}"
 
     # ── interpreter lane: byte-identical to the native golden ──
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}})
-    walk_out = try do Walk.run(ast, %{"print" => 0, "__host" => 1}); Runtime.__output() catch :throw, _ -> Runtime.__output() end
+    walk_ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}}
+
+    {:completed, walk_out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(walk_ctx)
+        try do Walk.run(ast, %{"print" => 0, "__host" => 1}) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
     walk_chunks = parse_chunks(chunk_line(walk_out), @soh)
     assert walk_chunks == golden, "interpreter output diverged from native rollup golden"
 
@@ -89,10 +95,18 @@ defmodule TinyLasers.Gate.F2RollupScaleTest do
     end
 
     {:main, main, _} = List.keyfind(mods, :main, 0)
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}})
-    for {tag, m, _} <- mods, tag != :main, do: apply(m, :__gg_register, [])
-    try do apply(main, :run, []) catch :throw, _ -> :ok end
-    comp_chunks = parse_chunks(chunk_line(Runtime.__output()), @soh)
+    comp_ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}}
+    sibs = for {tag, m, _} <- mods, tag != :main, do: m
+
+    {:completed, comp_out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(comp_ctx)
+        Enum.each(sibs, fn s -> apply(s, :__gg_register, []) end)
+        try do apply(main, :run, []) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
+
+    comp_chunks = parse_chunks(chunk_line(comp_out), @soh)
     assert comp_chunks == golden, "compiled lane output diverged from native rollup golden"
   end
 end

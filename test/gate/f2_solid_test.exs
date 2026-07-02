@@ -50,8 +50,9 @@ defmodule TinyLasers.Gate.F2SolidTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled Solid module not confined"
 
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-    try do apply(m, :run, []); Runtime.drain_microtasks() catch :throw, _ -> :ok end
-    assert String.trim(extract(Runtime.__output())) == golden, "compiled lane Solid render diverged from node golden"
+    # BOUNDED run — the guest can never exhaust the test host (memory + wall-clock capped, incl. off-heap binaries)
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+    {:completed, out} = TinyLasers.Gate.bounded_run(m, [], ctx, timeout: 120_000, max_heap_size: 134_217_728)
+    assert String.trim(extract(out)) == golden, "compiled lane Solid render diverged from node golden"
   end
 end

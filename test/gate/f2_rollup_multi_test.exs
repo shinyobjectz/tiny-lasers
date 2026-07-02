@@ -46,10 +46,16 @@ defmodule TinyLasers.Gate.F2RollupMultiTest do
     end
 
     {:main, main, _} = List.keyfind(mods, :main, 0)
-    Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}})
-    for {tag, m, _} <- mods, tag != :main, do: apply(m, :__gg_register, [])
-    try do apply(main, :run, []) catch :throw, _ -> :ok end
-    out = Runtime.__output()
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}, 1 => %{fun: &Runtime.host_rollup_bridge/2}}, tenant_root: "/t", fs: %{}}
+    sibs = for {tag, m, _} <- mods, tag != :main, do: m
+
+    {:completed, out} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        Enum.each(sibs, fn s -> apply(s, :__gg_register, []) end)
+        try do apply(main, :run, []) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 180_000, max_heap_size: 268_435_456)
 
     ok_line = Enum.find(out, &String.starts_with?(&1, "MULTI_OK["))
     assert ok_line, "rollup did not produce MULTI_OK; output=#{inspect(Enum.take(out, 10))}"

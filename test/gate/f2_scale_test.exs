@@ -43,11 +43,17 @@ defmodule TinyLasers.Gate.F2ScaleTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin)
 
-    Runtime.__init(%{caps: %{}, tenant_root: "/t", fs: %{}})
-    conv = try do apply(m, :run, []) catch :throw, {:gg_return, v} -> v end
+    # BOUNDED: the guest function `conv` closes over child-process state, so the whole exercise (build it, call
+    # it 300×) runs inside ONE bounded process; a runaway is killed, never the test host. Only `last` comes back.
+    ctx = %{caps: %{}, tenant_root: "/t", fs: %{}}
 
-    doc = String.duplicate("# Head **bold**\nPara `code` [a](http://x).\n\n", 50)
-    last = Enum.reduce(1..300, "", fn _, _ -> Runtime.call(conv, [doc]) end)
+    {:completed, last} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        conv = try do apply(m, :run, []) catch :throw, {:gg_return, v} -> v end
+        doc = String.duplicate("# Head **bold**\nPara `code` [a](http://x).\n\n", 50)
+        Enum.reduce(1..300, "", fn _, _ -> Runtime.call(conv, [doc]) end)
+      end, timeout: 120_000, max_heap_size: 134_217_728)
 
     assert String.starts_with?(last, "<h1>Head <b>bold</b></h1>")
   end
