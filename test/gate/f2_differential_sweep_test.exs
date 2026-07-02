@@ -219,7 +219,10 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     # class extends Array (linkedom's NodeList/HTMLCollection): the instance backs a real array — push/length/
     # index/isArray/for-of/spread/map delegate, and custom subclass methods still work.
     {"extends-array", ~S'class L extends Array { last() { return this[this.length - 1]; } } var l = new L(); l.push(3); l.push(7); var s = ""; for (var x of l) s += x + ","; print(l.length + "|" + l[0] + "|" + Array.isArray(l) + "|" + l.last() + "|" + s + "|" + [...l].join("-") + "|" + l.map(function(x) { return x * 2; }).join(","));'},
-    {"extends-array-methodval", ~S'class L extends Array {} var l = new L(); l.push("a"); l.push("b"); var f = l.forEach; print((typeof f) + "|" + l.join("/") + "|" + l.indexOf("b"));'}
+    {"extends-array-methodval", ~S'class L extends Array {} var l = new L(); l.push("a"); l.push("b"); var f = l.forEach; print((typeof f) + "|" + l.join("/") + "|" + l.indexOf("b"));'},
+    # large constant array/object literals fold to BEAM literals (Lower) — this must stay value-identical to the
+    # inline lowering, including nested arrays/objects (linkedom's HTML entity tables).
+    {"const-fold-array", ~S'var t = []; for (var i = 0; i < 60; i++) t.push([i, "e" + i]); var lit = [[0,"e0"],[1,{a:1,b:"x"}],[2,[3,4]],[3,"z"],[4,-5],[5,true],[6,null],[7,1.5],[8,"h"],[9,"i"],[10,"j"],[11,"k"],[12,"l"],[13,"m"],[14,"n"],[15,"o"],[16,"p"],[17,"q"],[18,"r"],[19,"s"],[20,"t"],[21,"u"],[22,"v"],[23,"w"],[24,"aa"],[25,"bb"],[26,"cc"],[27,"dd"],[28,"ee"],[29,"ff"],[30,"gg"],[31,"hh"],[32,"ii"],[33,"jj"],[34,"kk"],[35,"ll"],[36,"mm"],[37,"nn"],[38,"oo"],[39,"pp"],[40,"qq"],[41,"rr"],[42,"ss"],[43,"tt"],[44,"uu"],[45,"vv"],[46,"ww"],[47,"xx"],[48,"yy"],[49,"zz"]]; print(lit.length + "|" + lit[1][1].b + "|" + lit[2][1].join(",") + "|" + lit[4][1] + "|" + JSON.stringify(lit[6]));'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do

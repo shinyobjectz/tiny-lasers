@@ -814,6 +814,16 @@ defmodule TinyLasers.Gate.Runtime do
   @doc "Array literal from evaluated elements."
   def alit(elems) when is_list(elems), do: avec(elems)
 
+  # Build a nested array/object from a BEAM-literal term (large CONSTANT literals — e.g. linkedom's HTML entity
+  # tables — fold to this in Lower to dodge BEAM's per-function instruction limit). {:arrlit,_}/{:objlit,_} tag
+  # the containers; every primitive (float/string/bool/:null/{:bigint}/:undefined) passes through unchanged.
+  def deep_lit({:arrlit, els}), do: avec(Enum.map(els, &deep_lit/1))
+  def deep_lit({:objlit, pairs}), do: cell_new(Enum.map(pairs, fn {k, v} -> {k, deep_lit(v)} end))
+  def deep_lit(v), do: v
+
+  @doc "Flatten a list of arrays into one array (partial-folded array literals concat their segments in order)."
+  def aconcat(arrs), do: avec(Enum.flat_map(arrs, &al/1))
+
   @doc "Array literal WITH spread elements: parts are `{:one, v}` | `{:spread, iterable}`."
   def aspread(parts) do
     avec(Enum.flat_map(parts, fn {:spread, v} -> iter(v); {:one, v} -> [v] end))

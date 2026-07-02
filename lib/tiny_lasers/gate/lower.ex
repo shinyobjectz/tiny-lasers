@@ -992,14 +992,22 @@ defmodule TinyLasers.Gate.Lower do
     has_accessor = Enum.any?(props, &(&1["kind"] in ["get", "set"]))
 
     if not has_spread and not has_accessor do
-      # fast path: a plain data-bag object → one cell_new with all key/value pairs.
-      pairs =
-        Enum.map(props, fn p ->
-          kq = if p["computed"], do: expr(p["key"], scope), else: key_of(p["key"])
-          quote(do: {unquote(kq), unquote(expr(p["value"], scope))})
-        end)
+      cond do
+        # a LARGE fully-constant object literal folds to a BEAM literal + one deep_lit (same reason as arrays).
+        length(props) > 48 and match?({:ok, _}, const_term(%{"type" => "ObjectExpression", "properties" => props})) ->
+          {:ok, term} = const_term(%{"type" => "ObjectExpression", "properties" => props})
+          quote(do: unquote(@runtime).deep_lit(unquote(Macro.escape(term))))
 
-      quote(do: unquote(@runtime).cell_new(unquote(pairs)))
+        true ->
+          # fast path: a plain data-bag object → one cell_new with all key/value pairs.
+          pairs =
+            Enum.map(props, fn p ->
+              kq = if p["computed"], do: expr(p["key"], scope), else: key_of(p["key"])
+              quote(do: {unquote(kq), unquote(expr(p["value"], scope))})
+            end)
+
+          quote(do: unquote(@runtime).cell_new(unquote(pairs)))
+      end
     else
       # accessors or spread present: build in property ORDER (spread merges, get/set install/merge accessors).
       Enum.reduce(props, quote(do: unquote(@runtime).cell_new([])), fn p, acc ->
@@ -1028,18 +1036,62 @@ defmodule TinyLasers.Gate.Lower do
   end
 
   defp expr(%{"type" => "ArrayExpression", "elements" => els}, scope) do
-    if Enum.any?(els, &(&1 && &1["type"] == "SpreadElement")) do
-      parts =
-        Enum.map(els, fn
-          %{"type" => "SpreadElement", "argument" => a} -> quote(do: {:spread, unquote(expr(a, scope))})
-          nil -> quote(do: {:one, :undefined})
-          e -> quote(do: {:one, unquote(expr(e, scope))})
-        end)
+    cond do
+      Enum.any?(els, &(&1 && &1["type"] == "SpreadElement")) ->
+        parts =
+          Enum.map(els, fn
+            %{"type" => "SpreadElement", "argument" => a} -> quote(do: {:spread, unquote(expr(a, scope))})
+            nil -> quote(do: {:one, :undefined})
+            e -> quote(do: {:one, unquote(expr(e, scope))})
+          end)
 
-      quote(do: unquote(@runtime).aspread(unquote(parts)))
-    else
+        quote(do: unquote(@runtime).aspread(unquote(parts)))
+
+      # a LARGE array of mostly-constant elements (linkedom's HTML entity tables: `[[9,"&Tab;"], …]` × thousands,
+      # a few with embedded `new Map(…)`) folds constant RUNS to BEAM-literal terms + inlines the non-constant
+      # elements, concatenated — instead of thousands of alit() calls that blow BEAM's per-function instruction
+      # limit. Small arrays keep the exact inline lowering.
+      length(els) > 48 -> fold_array(els, scope)
+
+      true ->
+        elq = Enum.map(els, fn e -> if e, do: expr(e, scope), else: :undefined end)
+        quote(do: unquote(@runtime).alit(unquote(elq)))
+    end
+  end
+
+  defp fold_array(els, scope) do
+    tagged = Enum.map(els, fn e -> {e, if(e, do: const_term(e), else: {:ok, :undefined})} end)
+    nonconst = Enum.count(tagged, fn {_, ct} -> ct == :no end)
+
+    inline = fn ->
       elq = Enum.map(els, fn e -> if e, do: expr(e, scope), else: :undefined end)
       quote(do: unquote(@runtime).alit(unquote(elq)))
+    end
+
+    cond do
+      nonconst == 0 ->
+        terms = Enum.map(tagged, fn {_, {:ok, t}} -> t end)
+        quote(do: unquote(@runtime).deep_lit(unquote(Macro.escape({:arrlit, terms}))))
+
+      # mostly constant with a few holes: fold const runs → literals, inline the rest, concat (order preserved).
+      nonconst < 96 ->
+        seg_qs =
+          tagged
+          |> Enum.chunk_by(fn {_, ct} -> match?({:ok, _}, ct) end)
+          |> Enum.map(fn seg ->
+            if match?({:ok, _}, elem(hd(seg), 1)) do
+              terms = Enum.map(seg, fn {_, {:ok, t}} -> t end)
+              quote(do: unquote(@runtime).deep_lit(unquote(Macro.escape({:arrlit, terms}))))
+            else
+              elq = Enum.map(seg, fn {e, _} -> if e, do: expr(e, scope), else: :undefined end)
+              quote(do: unquote(@runtime).alit(unquote(elq)))
+            end
+          end)
+
+        quote(do: unquote(@runtime).aconcat(unquote(seg_qs)))
+
+      true ->
+        inline.()
     end
   end
 
@@ -1814,11 +1866,14 @@ defmodule TinyLasers.Gate.Lower do
         name = String.to_atom("__gg_f#{fnid}_c#{i}")
         mentioned = MapSet.new(all_idents(nodes))
 
-        pat_elems =
-          [thisq] ++
-            Enum.map(locals, fn v ->
-              if MapSet.member?(mentioned, v), do: lvar(v), else: Macro.var(:_, __MODULE__)
-            end)
+        # pass ONLY the vars THIS chunk mentions — not all `locals`. A function with hundreds/thousands of locals
+        # (linkedom's big HTML parser) would otherwise give every chunk an N-wide env tuple, which exceeds BEAM's
+        # per-function limit at BOTH ends: building the literal needs N live registers, and matching it is an
+        # N-arity tuple pattern. Locals are shared BOXES (by handle), so a per-chunk subset is correct — a write
+        # through a box is visible to any chunk holding that handle; the pattern and the call tuple below use the
+        # SAME `chunk_locals` order, so positions align.
+        chunk_locals = Enum.filter(locals, &MapSet.member?(mentioned, &1))
+        pat_elems = [thisq | Enum.map(chunk_locals, &lvar/1)]
 
         d =
           quote do
@@ -1830,7 +1885,7 @@ defmodule TinyLasers.Gate.Lower do
           end
 
         Process.put(:gg_lower_defs, [{name, d} | Process.get(:gg_lower_defs)])
-        envq = {:{}, [], [thisq | Enum.map(locals, &lvar/1)]}
+        envq = {:{}, [], [thisq | Enum.map(chunk_locals, &lvar/1)]}
         # invoke by NAME through the cf registry: the def may land in a SIBLING module (parallel compile),
         # and callers must hold no reference to it.
         {quote(do: unquote(@runtime).cf(unquote(Atom.to_string(name)), unquote(envq))), sc2}
@@ -2274,6 +2329,46 @@ defmodule TinyLasers.Gate.Lower do
   defp key_of(%{"type" => "Identifier", "name" => n}), do: n
   defp key_of(%{"type" => "Literal", "value" => v}) when is_binary(v), do: v
   defp key_of(%{"type" => "Literal", "value" => v}), do: to_string(v)
+
+  # fully-constant array/object literal → a plain Elixir term (nested arrays tagged {:arrlit, list}, objects
+  # {:objlit, pairs}) that the runtime's deep_lit builds ONCE from the BEAM literal pool. Returns :no for anything
+  # that isn't a compile-time constant. Numbers/strings/etc. use `lit/1` so the folded term matches the inline
+  # lowering exactly (integers → floats, null → :null).
+  defp const_term(%{"type" => "Literal", "regex" => _}), do: :no
+  defp const_term(%{"type" => "Literal", "value" => v}), do: {:ok, lit(v)}
+
+  defp const_term(%{"type" => "UnaryExpression", "operator" => op, "argument" => %{"type" => "Literal", "value" => v}})
+       when is_number(v) and op in ["-", "+"],
+       do: {:ok, if(op == "-", do: -(v * 1.0), else: v * 1.0)}
+
+  defp const_term(%{"type" => "ArrayExpression", "elements" => els}) do
+    terms = Enum.map(els, fn nil -> {:ok, :undefined}; e -> const_term(e) end)
+    if Enum.all?(terms, &match?({:ok, _}, &1)),
+      do: {:ok, {:arrlit, Enum.map(terms, &elem(&1, 1))}},
+      else: :no
+  end
+
+  defp const_term(%{"type" => "ObjectExpression", "properties" => props}) do
+    pairs =
+      Enum.map(props, fn
+        %{"type" => "Property", "key" => k, "value" => v} = p ->
+          # non-computed data property with a constant value. A shorthand `{v}` has value = Identifier → its
+          # const_term is :no, so we don't need a separate shorthand check (and the "shorthand" key isn't always
+          # present in the AST — requiring it wrongly rejected `[0, {v:"&lt;", n:8402, o:"&nvlt;"}]`).
+          if p["computed"] != true and (p["kind"] || "init") == "init",
+            do: (case const_term(v) do {:ok, t} -> {:ok, {key_of(k), t}}; :no -> :no end),
+            else: :no
+
+        _ ->
+          :no
+      end)
+
+    if Enum.all?(pairs, &match?({:ok, _}, &1)),
+      do: {:ok, {:objlit, Enum.map(pairs, &elem(&1, 1))}},
+      else: :no
+  end
+
+  defp const_term(_), do: :no
 
   defp lit(v) when is_integer(v), do: v * 1.0
   defp lit(v) when is_float(v), do: v
