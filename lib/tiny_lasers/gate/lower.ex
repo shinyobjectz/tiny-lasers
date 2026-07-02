@@ -709,7 +709,10 @@ defmodule TinyLasers.Gate.Lower do
     all_members = (n["body"] && n["body"]["body"]) || []
     # class FIELDS (PropertyDefinition, svelte 5 uses them heavily) are not methods: instance fields become
     # `this.<key> = <init>` prepended to the ctor; static fields become `C.<key> = <init>` after the class.
-    {prop_defs, members} = Enum.split_with(all_members, &(&1["type"] == "PropertyDefinition"))
+    {prop_defs, rest} = Enum.split_with(all_members, &(&1["type"] == "PropertyDefinition"))
+    # only MethodDefinitions are methods; a StaticBlock (`class C { static { … } }`, ES2022) has no key and
+    # would crash key_of — skip it (Walk skips it too, so the lanes agree; static blocks are rare).
+    members = Enum.filter(rest, &(&1["type"] == "MethodDefinition"))
     {static_fields, inst_fields} = Enum.split_with(prop_defs, & &1["static"])
     ctor = Enum.find(members, &(&1["kind"] == "constructor"))
 
