@@ -146,7 +146,17 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"getter-only-write-noop", ~S'var o = { get x() { return 7; } }; o.x = 99; print(o.x);'},
     {"defineProperty-get-then-set", ~S'var s = 0; var o = {}; Object.defineProperty(o, "p", { get: function() { return s; } }); Object.defineProperty(o, "p", { set: function(v) { s = v + 1; } }); o.p = 10; print(o.p);'},
     {"inherited-setter", ~S'class Base { set val(v) { this._v = v * 3; } get val() { return this._v; } } class Sub extends Base {} var s = new Sub(); s.val = 4; print(s.val);'},
-    {"static-accessor-set", ~S'class C { static get mode() { return C._m || "d"; } static set mode(v) { C._m = "set:" + v; } } C.mode = "prod"; print(C.mode);'}
+    {"static-accessor-set", ~S'class C { static get mode() { return C._m || "d"; } static set mode(v) { C._m = "set:" + v; } } C.mode = "prod"; print(C.mode);'},
+
+    # real bigint (arbitrary precision): typeof, arithmetic, bit shifts past bit 53 (rollup chunk signatures
+    # `atomMask <<= 1n`), 30-digit BigInt(), string coercion, comparison, unary, array bit-masks.
+    {"bigint-typeof-arith", ~S'print(typeof 5n | "" || (typeof 5n) + "," + (2n + 3n) + "," + (17n / 5n) + "," + (17n % 5n) + "," + (2n ** 10n));'},
+    {"bigint-shift-past-53", ~S'var mask = 1n; var s = []; for (var i = 0; i < 64; i++) { s.push(mask); mask <<= 1n; } print(s[52] + "," + s[63]);'},
+    {"bigint-or-accumulate", ~S'var acc = 0n; for (var i = 0; i < 60; i++) acc |= (1n << BigInt(i)); print(acc + "," + (acc === ((1n << 60n) - 1n)));'},
+    {"bigint-string-coerce", ~S'print(String(42n) + "|" + (255n).toString(16) + "|" + ("x" + 3n));'},
+    {"bigint-huge-from", ~S'print(BigInt("123456789012345678901234567890") + "," + typeof BigInt(5.9));'},
+    {"bigint-compare-unary", ~S'print((5n < 10n) + "," + (5n === 5n) + "," + (5n === 5) + "," + (5n == 5) + "," + (0n ? "T" : "F") + "," + (-5n) + "," + (~5n));'},
+    {"bigint-array-mask", ~S'var arr = new Array(3).fill(0n); arr[0] |= 1n; arr[1] |= (1n << 40n); arr[2] |= (1n << 55n); print(arr[0] + "," + arr[1] + "," + arr[2]);'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do

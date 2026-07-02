@@ -2153,9 +2153,8 @@ defmodule TinyLasers.Gate.Lower do
 
   defp lit(v) when is_integer(v), do: v * 1.0
   defp lit(v) when is_float(v), do: v
-  # BigInt literal (tagged by the parser's replacer). No bigint term in F2 yet — represent as a float so the
-  # value flows; exact >2^53 bigint math is a later rung, taken only if a reachable op actually needs it.
-  defp lit(%{"$bigint" => s}), do: (case Integer.parse(s) do {i, _} -> i * 1.0; _ -> 0.0 end)
+  # BigInt literal `5n` (tagged by the parser's replacer) → arbitrary-precision `{:bigint, n}` (Elixir int).
+  defp lit(%{"$bigint" => s}), do: {:bigint, (case Integer.parse(s) do {i, _} -> i; _ -> 0 end)}
   defp lit(v) when is_binary(v), do: v
   defp lit(true), do: true
   defp lit(false), do: false

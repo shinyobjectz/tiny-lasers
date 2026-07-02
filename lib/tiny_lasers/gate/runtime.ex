@@ -1038,6 +1038,14 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
   def method(n, "valueOf", _) when is_number(n), do: n
+  # bigint methods: (n).toString([radix]) and (n).valueOf().
+  def method({:bigint, n}, "toString", args) do
+    case args do
+      [r | _] when is_number(r) and r != 10.0 -> Integer.to_string(n, trunc(r)) |> String.downcase()
+      _ -> Integer.to_string(n)
+    end
+  end
+  def method({:bigint, _} = b, "valueOf", _), do: b
   def method(s, "codePointAt", [i | _]) when is_binary(s) do
     case oget(s, i * 1) do c when is_binary(c) -> (:binary.first(c)) * 1.0; _ -> :undefined end
   end
@@ -1392,8 +1400,9 @@ defmodule TinyLasers.Gate.Runtime do
   def call({:globalfn, "parseFloat"}, [x | _]), do: to_number(x)
   def call({:globalfn, "isNaN"}, [x | _]), do: not is_number(x)
   def call({:globalfn, "isFinite"}, [x | _]), do: is_number(x)
-  # BigInt(x) — bigints are floats in F2 (same as the $bigint literal lowering); exact >2^53 is a later rung.
-  def call({:globalfn, "BigInt"}, [x | _]), do: to_number(x)
+  # BigInt(x) → arbitrary-precision `{:bigint, n}` (integer from a string, or the truncated number/bool).
+  def call({:globalfn, "BigInt"}, [x | _]), do: {:bigint, bi_int(x)}
+  def call({:globalfn, "BigInt"}, []), do: {:bigint, 0}
   def call({:globalfn, enc}, [x | _]) when enc in ["encodeURIComponent", "encodeURI"], do: URI.encode(to_str(x))
   def call({:globalfn, dec}, [x | _]) when dec in ["decodeURIComponent", "decodeURI"], do: URI.decode(to_str(x))
   def call({:globalfn, _}, _), do: :undefined
@@ -1439,6 +1448,7 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "ToNumber coercion (public: unary + uses it)."
   def to_number(x) when is_number(x), do: x
+  def to_number({:bigint, n}), do: n * 1.0
   def to_number({:date, ms}), do: ms
   def to_number(x) when x in [:infinity, :neg_infinity, :nan], do: x
   def to_number(true), do: 1.0
@@ -2013,6 +2023,12 @@ defmodule TinyLasers.Gate.Runtime do
 
   # ── arithmetic / comparison (closed, type-checked, no raw host ops on guest data) ──
 
+  # BIGINT: `{:bigint, n}` with n an ARBITRARY-PRECISION Elixir integer. Any op with a bigint operand routes
+  # here — bit shifts do NOT truncate to 32 bits (rollup's chunk signatures `atomMask <<= 1n` need full width),
+  # division is integer (toward zero). Placed before the number clauses; a bigint is a tuple, not is_number.
+  def binop(op, {:bigint, _} = a, b), do: bigint_binop(op, a, b)
+  def binop(op, a, {:bigint, _} = b), do: bigint_binop(op, a, b)
+
   def binop(:+, a, b) when is_number(a) and is_number(b), do: a + b
   def binop(:+, a, b), do: to_str(a) <> to_str(b)
   def binop(:-, a, b) when is_number(a) and is_number(b), do: a - b
@@ -2085,6 +2101,52 @@ defmodule TinyLasers.Gate.Runtime do
     guest_error("bad operands")
   end
 
+  # bigint arithmetic/bitwise/comparison. `+` with a string concatenates (JS `1n + "x"` → "1x"); everything
+  # else works on the integer values (a number operand is truncated to an integer — F2 is permissive where JS
+  # would throw on mixed bigint/number, since the rollup path is all-bigint). === is strict (both must be
+  # bigint); == is loose value equality across bigint/number/string.
+  defp bigint_binop(:+, a, b) when is_binary(a) or is_binary(b), do: to_str(a) <> to_str(b)
+
+  defp bigint_binop(op, a, b) do
+    both_bi? = match?({:bigint, _}, a) and match?({:bigint, _}, b)
+    x = bi_int(a)
+    y = bi_int(b)
+
+    case op do
+      :+ -> {:bigint, x + y}
+      :- -> {:bigint, x - y}
+      :* -> {:bigint, x * y}
+      :/ -> if y == 0, do: guest_error("Division by zero"), else: {:bigint, div(x, y)}
+      :rem -> if y == 0, do: guest_error("Division by zero"), else: {:bigint, rem(x, y)}
+      :pow -> if y < 0, do: guest_error("Exponent must be non-negative"), else: {:bigint, Integer.pow(x, y)}
+      :band -> {:bigint, Bitwise.band(x, y)}
+      :bor -> {:bigint, Bitwise.bor(x, y)}
+      :bxor -> {:bigint, Bitwise.bxor(x, y)}
+      # arbitrary-precision shifts — NO 32-bit mask (rollup's `atomMask <<= 1n` past bit 31).
+      :bsl -> {:bigint, Bitwise.bsl(x, y)}
+      :bsr -> {:bigint, Bitwise.bsr(x, y)}
+      :< -> x < y
+      :> -> x > y
+      :"<=" -> x <= y
+      :">=" -> x >= y
+      :=== -> both_bi? and x == y
+      :!== -> not (both_bi? and x == y)
+      :== -> x == y
+      :!= -> x != y
+      _ -> guest_error("bad operands")
+    end
+  end
+
+  # integer value of a bigint / number / bool for bigint math (JS would throw on a non-integer number operand;
+  # F2 truncates).
+  defp bi_int({:bigint, n}), do: n
+  defp bi_int(n) when is_integer(n), do: n
+  defp bi_int(n) when is_float(n), do: trunc(n)
+  defp bi_int(true), do: 1
+  defp bi_int(false), do: 0
+  defp bi_int(s) when is_binary(s), do: (case Integer.parse(String.trim(s)) do {i, ""} -> i; _ -> 0 end)
+  defp bi_int(_), do: 0
+
   defp nullish?(:null), do: true
   defp nullish?(:undefined), do: true
   defp nullish?(_), do: false
@@ -2138,6 +2200,7 @@ defmodule TinyLasers.Gate.Runtime do
   def truthy(0), do: false
   def truthy(+0.0), do: false
   def truthy(""), do: false
+  def truthy({:bigint, 0}), do: false
   def truthy(_), do: true
 
   # ── helpers ──
@@ -2145,6 +2208,7 @@ defmodule TinyLasers.Gate.Runtime do
   # Guest property keys are always binaries. A guest never produces an atom key,
   # and we never atomize a guest string — this is the atom-domain firewall.
   defp key_str(k) when is_binary(k), do: k
+  defp key_str({:bigint, n}), do: Integer.to_string(n)
   defp key_str(k) when is_number(k), do: to_str(k)
   defp key_str(true), do: "true"
   defp key_str(false), do: "false"
@@ -2156,6 +2220,8 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "Stringify a guest value for output (spike formatting; byte-exact dtoa is a separate layer)."
   def to_str(v) when is_binary(v), do: v
+  # a bigint stringifies as the plain integer (no `n` suffix): String(5n) === "5".
+  def to_str({:bigint, n}), do: Integer.to_string(n)
   def to_str(v) when is_integer(v), do: Integer.to_string(v)
 
   def to_str(v) when is_float(v) do
@@ -2339,6 +2405,7 @@ defmodule TinyLasers.Gate.Runtime do
   def enum_keys(_), do: []
 
   @doc "`typeof` — a fixed set of result binaries (never guest-controlled atoms)."
+  def typeof({:bigint, _}), do: "bigint"
   def typeof(v) when is_number(v), do: "number"
   def typeof(v) when is_binary(v), do: "string"
   def typeof(v) when is_boolean(v), do: "boolean"

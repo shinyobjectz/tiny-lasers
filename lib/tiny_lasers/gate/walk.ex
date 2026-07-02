@@ -244,7 +244,7 @@ defmodule TinyLasers.Gate.Walk do
 
   # ── expressions ─────────────────────────────────────────────────────────────────────────────────────────
   defp eval(%{"type" => "Literal", "regex" => %{"pattern" => p, "flags" => f}}, _env), do: Runtime.regex(p, f)
-  defp eval(%{"type" => "Literal", "value" => %{"$bigint" => s}}, _env), do: (case Integer.parse(s) do {i, _} -> i * 1.0; _ -> 0.0 end)
+  defp eval(%{"type" => "Literal", "value" => %{"$bigint" => s}}, _env), do: {:bigint, (case Integer.parse(s) do {i, _} -> i; _ -> 0 end)}
   defp eval(%{"type" => "Literal", "value" => v}, _env), do: lit(v)
   defp eval(%{"type" => "Identifier", "name" => n}, env), do: get_var(env, n)
   defp eval(%{"type" => "ThisExpression"}, env), do: get_var(env, "this")
