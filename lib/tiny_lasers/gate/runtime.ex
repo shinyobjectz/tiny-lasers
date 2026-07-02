@@ -306,7 +306,30 @@ defmodule TinyLasers.Gate.Runtime do
       coll -> oget(coll, "size")
     end
   end
-  def oget({:cell, _} = c, k), do: cell_oget(c, key_str(k), c)
+  def oget({:cell, id} = c, k) do
+    # a cell backed by a real array (class extends Array) exposes the array's length + indexed elements; other
+    # keys (custom props/methods) come from the cell.
+    case Process.get({:gg_cellarr, id}) do
+      nil ->
+        cell_oget(c, key_str(k), c)
+
+      arr ->
+        cond do
+          k == "length" or arr_index(k) != nil ->
+            oget(arr, k)
+
+          true ->
+            # custom props/methods (via the subclass prototype) win; fall back to the array's own method as a
+            # first-class value (`var f = nodeList.forEach`) when the subclass doesn't define it. The closure
+            # binds to the BACKING ARRAY (not `this`) — else method({:cell},…) would re-read oget→closure→invoke
+            # forever.
+            v = cell_oget(c, key_str(k), c)
+            if v == :undefined and is_binary(k) and k in @arr_methods,
+              do: closure(fn _this, cargs -> method(arr, k, cargs) end),
+              else: v
+        end
+    end
+  end
 
   # resolve a cell property through the prototype chain; a `{:getter, fn}` marker is invoked with `this` = the
   # ORIGINAL receiver (so a prototype getter reading the instance's scope state works).
@@ -1260,12 +1283,16 @@ defmodule TinyLasers.Gate.Runtime do
 
   def method({:cell, id} = c, name, args) do
     coll = Process.get({:gg_cellcoll, id})
+    arr = Process.get({:gg_cellarr, id})
     cond do
       match?({:fn, _}, oget(c, name)) -> invoke(oget(c, name), c, args)
       # a cell backed by a Set/Map (class extends Set/Map): delegate collection methods. Mutators return the
       # instance (this) for chaining; queries return the result.
       coll != nil and name in ["add", "set"] -> method(coll, name, args); c
       coll != nil and name in ["has", "get", "delete", "clear", "forEach", "keys", "values", "entries"] -> method(coll, name, args)
+      # a cell backed by a real array (class extends Array — linkedom's NodeList/HTMLCollection): delegate array
+      # methods to the backing array, which mutates in place, so this.push(x)/this.splice(…) grow the instance.
+      arr != nil and name in @arr_methods -> method(arr, name, args)
       true ->
         if System.get_env("GAPLOG"), do: IO.puts(:stderr, "GAP cellmeth #{inspect(name)} keys=#{inspect(okeys(c)) |> String.slice(0, 90)}")
         if System.get_env("GAPSOFT"), do: :undefined, else: guest_error("not a function")
@@ -1476,6 +1503,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
   defp object_static(_, _), do: :undefined
 
+  defp array_static("isArray", [{:cell, id} | _]), do: Process.get({:gg_cellarr, id}) != nil
   defp array_static("isArray", [x | _]), do: match?({:arr, _}, x)
   defp array_static("from", [x | rest]) do
     # any iterable — Map yields [k,v] pairs, Set its members (rollup's getResolveStaticDependencyPromises is
@@ -2194,6 +2222,12 @@ defmodule TinyLasers.Gate.Runtime do
     Process.put({:gg_cellcoll, id}, construct({:global, coll}, args))
     this
   end
+  # `super()` in a `class X extends Array` — back the instance cell with a real array so this.push/.length/
+  # indexed access delegate. `new X()` → empty; `new X(n)` / `new X(...items)` follow the Array constructor.
+  def invoke({:global, "Array"}, {:cell, id} = this, args) do
+    Process.put({:gg_cellarr, id}, construct({:global, "Array"}, args))
+    this
+  end
   def invoke({:global, _} = g, {:cell, _} = this, args) do
     case construct(g, args) do
       {:cell, _} = c -> Enum.each(okeys(c), fn k -> oput(this, k, oget(c, k)) end); this
@@ -2748,6 +2782,13 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "for-of iteration items: array elements, or a string's chars (1-char binaries)."
   def iter({:arr, _} = a), do: al(a)
+  # a cell backed by a real array (class extends Array) iterates its elements (for-of / spread over a NodeList).
+  def iter({:cell, id}) do
+    case Process.get({:gg_cellarr, id}) do
+      nil -> []
+      arr -> al(arr)
+    end
+  end
   def iter({:set, _} = st), do: set_list(st)
   def iter({:ta, _, _, _, _} = ta), do: ta_elems(ta)
   def iter({:map, _} = mp), do: Enum.map(map_pairs(mp), fn {k, v} -> avec([k, v]) end)

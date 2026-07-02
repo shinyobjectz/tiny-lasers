@@ -215,7 +215,11 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     # COMPUTED method call must bind `this` (obj[key](args)) like the dotted case — GSAP's ticker does
     # `_listeners[prio ? "unshift" : "push"](cb)`; the Lower lane was calling the bound method with no receiver.
     {"computed-method-this", ~S'var a = []; a["push"](1); a[true ? "push" : "x"](2); var k = "push"; a[k](3); function f(p) { a[p ? "unshift" : "push"](4); } f(); print(a.join(",") + "|" + a.length);'},
-    {"computed-method-str", ~S'var s = "Hello"; var m = "toUpperCase"; print(s[m]() + "|" + "abc"["slice"](1) + "|" + [3, 1, 2]["sort"]().join(""));'}
+    {"computed-method-str", ~S'var s = "Hello"; var m = "toUpperCase"; print(s[m]() + "|" + "abc"["slice"](1) + "|" + [3, 1, 2]["sort"]().join(""));'},
+    # class extends Array (linkedom's NodeList/HTMLCollection): the instance backs a real array — push/length/
+    # index/isArray/for-of/spread/map delegate, and custom subclass methods still work.
+    {"extends-array", ~S'class L extends Array { last() { return this[this.length - 1]; } } var l = new L(); l.push(3); l.push(7); var s = ""; for (var x of l) s += x + ","; print(l.length + "|" + l[0] + "|" + Array.isArray(l) + "|" + l.last() + "|" + s + "|" + [...l].join("-") + "|" + l.map(function(x) { return x * 2; }).join(","));'},
+    {"extends-array-methodval", ~S'class L extends Array {} var l = new L(); l.push("a"); l.push("b"); var f = l.forEach; print((typeof f) + "|" + l.join("/") + "|" + l.indexOf("b"));'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do
