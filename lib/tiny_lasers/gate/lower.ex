@@ -211,9 +211,16 @@ defmodule TinyLasers.Gate.Lower do
     {fnnodes, rest} =
       Enum.split_with(nodes, &(is_map(&1) and &1["type"] == "FunctionDeclaration" and &1["id"]))
 
+    ggposl = System.get_env("GGPOSL")
+
     {rev, sc} =
       Enum.reduce(fnnodes ++ rest, {[], hoisted}, fn n, {acc, s} ->
         {q, s2} = stmt(n, s)
+        # GGPOSL=1 (read at lower time): stamp the source byte before each statement so a compiled-lane guest
+        # error can report a position (Lower otherwise leaves gg_pos nil). Off by default → zero overhead.
+        q = if ggposl && is_map(n) && is_integer(n["start"]),
+              do: {:__block__, [], [quote(do: Process.put(:gg_pos, unquote(n["start"]))), q]},
+              else: q
         {[q | acc], s2}
       end)
 
@@ -1140,6 +1147,94 @@ defmodule TinyLasers.Gate.Lower do
           end
         end
     end
+    end
+  end
+
+  # COMPUTED method call `obj[keyExpr](args)` — dispatch `method(obj, key, args)` with `obj` as the receiver,
+  # exactly like the dotted case above. Without this, computed calls fell through to the generic CallExpression
+  # path, which evaluates `obj[key]` to a bound-method VALUE and calls it with NO `this` (→ method(:undefined,…)):
+  # `arr["push"](x)`, `L[prio ? "unshift" : "push"](cb)` (GSAP's ticker) all silently failed on the compiled lane.
+  defp expr(%{"type" => "CallExpression", "callee" => %{"type" => "MemberExpression", "computed" => true} = m} = c, scope) do
+    kq = expr(m["property"], scope)
+    argq = args_of(c["arguments"], scope)
+    base = Macro.var(:__ggckbase, __MODULE__)
+    k = Macro.var(:__ggckey, __MODULE__)
+    res = Macro.var(:__ggckres, __MODULE__)
+
+    if m["optional"] || c["optional"] do
+      fn_guard = if c["optional"], do: quote(do: unquote(@runtime).optcall_missing?(unquote(base), unquote(k))), else: false
+
+      quote do
+        unquote(base) = unquote(expr(m["object"], scope))
+        unquote(k) = unquote(kq)
+
+        if unquote(base) in [:undefined, :null] do
+          unquote(@runtime).optchain_miss()
+        else
+          if unquote(fn_guard) do
+            unquote(@runtime).optchain_miss()
+          else
+            case unquote(@runtime).method(unquote(base), unquote(k), unquote(argq)) do
+              {:mut, _, r} -> r
+              v -> v
+            end
+          end
+        end
+      end
+    else
+      case m["object"] do
+        # identifier receiver: rebind on mutation (a[k].push writes through, so does a[k]() when a mutates)
+        %{"type" => "Identifier", "name" => rn} ->
+          if scope[:boxed] && MapSet.member?(scope.boxed, rn) do
+            quote do
+              unquote(k) = unquote(kq)
+
+              case unquote(@runtime).method(unquote(ident(rn, scope)), unquote(k), unquote(argq)) do
+                {:mut, nr, r} -> unquote(@runtime).box_set(unquote(lvar(rn)), nr); r
+                v -> v
+              end
+            end
+          else
+            quote do
+              unquote(k) = unquote(kq)
+
+              {unquote(lvar(rn)), unquote(res)} =
+                case unquote(@runtime).method(unquote(ident(rn, scope)), unquote(k), unquote(argq)) do
+                  {:mut, nr, r} -> {nr, r}
+                  v -> {unquote(ident(rn, scope)), v}
+                end
+
+              unquote(res)
+            end
+          end
+
+        %{"type" => "MemberExpression"} = recv_m ->
+          rk = if recv_m["computed"], do: expr(recv_m["property"], scope), else: key_of(recv_m["property"])
+
+          quote do
+            unquote(base) = unquote(expr(recv_m["object"], scope))
+            unquote(k) = unquote(kq)
+
+            unquote(res) =
+              case unquote(@runtime).method(unquote(@runtime).oget(unquote(base), unquote(rk)), unquote(k), unquote(argq)) do
+                {:mut, nr, r} -> unquote(@runtime).oput_idx(unquote(base), unquote(rk), nr); r
+                v -> v
+              end
+
+            unquote(res)
+          end
+
+        other ->
+          quote do
+            unquote(base) = unquote(expr(other, scope))
+            unquote(k) = unquote(kq)
+
+            case unquote(@runtime).method(unquote(base), unquote(k), unquote(argq)) do
+              {:mut, _, r} -> r
+              v -> v
+            end
+          end
+      end
     end
   end
 

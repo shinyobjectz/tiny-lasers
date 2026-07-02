@@ -211,7 +211,11 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"member-idxpp-for", ~S'var items = ["a","b","c"]; var out = new Array(items.length); var index = 0; for (var i = 0; i < items.length; i++) { out[index++] = items[i].toUpperCase(); } var r = []; for (const c of out) r.push(c); print(r.join(","));'},
     {"member-idxpp-forof", ~S'var a = new Array(3); var index = 0; for (const x of [1,2,3]) { a[index++] = x; } print(a.join(",") + "|" + index);'},
     {"member-idxpp-while", ~S'var a = new Array(3); var index = 0; var i = 0; while (i < 3) { a[index++] = i; i++; } print(a.join(",") + "|" + index);'},
-    {"member-idxpp-forof-destructure", ~S'var src = [{v:"a"},{v:"b"},{v:"c"}]; var chunks = new Array(src.length); var index = 0; for (const { v } of src) { chunks[index++] = v.toUpperCase(); } print(chunks.join(","));'}
+    {"member-idxpp-forof-destructure", ~S'var src = [{v:"a"},{v:"b"},{v:"c"}]; var chunks = new Array(src.length); var index = 0; for (const { v } of src) { chunks[index++] = v.toUpperCase(); } print(chunks.join(","));'},
+    # COMPUTED method call must bind `this` (obj[key](args)) like the dotted case — GSAP's ticker does
+    # `_listeners[prio ? "unshift" : "push"](cb)`; the Lower lane was calling the bound method with no receiver.
+    {"computed-method-this", ~S'var a = []; a["push"](1); a[true ? "push" : "x"](2); var k = "push"; a[k](3); function f(p) { a[p ? "unshift" : "push"](4); } f(); print(a.join(",") + "|" + a.length);'},
+    {"computed-method-str", ~S'var s = "Hello"; var m = "toUpperCase"; print(s[m]() + "|" + "abc"["slice"](1) + "|" + [3, 1, 2]["sort"]().join(""));'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do
