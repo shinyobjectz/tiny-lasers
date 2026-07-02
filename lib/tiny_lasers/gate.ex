@@ -27,6 +27,21 @@ defmodule TinyLasers.Gate do
   # The ONLY external module a confined guest may call.
   @allowed_modules MapSet.new([TinyLasers.Gate.Runtime])
 
+  # ── PRE-COMPILE window (audit_quoted/1) ──
+  # dangerous_refs/1 inspects the OUTPUT bytecode, but `Code.compile_quoted` expands macros and evaluates the
+  # module body BEFORE that output exists — a compile-time-execution window the output check cannot see. The
+  # lowered grammar is closed and tiny (verified empirically over the svelte + rollup bundles and a diverse
+  # construct sweep): the module body is ONLY function definitions; every remote call targets the Runtime; the
+  # only local call heads are compile-time-safe Kernel special-forms/operators. None is a code-executing macro
+  # (`eval`/`apply`/`use`/`import`/`require`/`quote`/`@attr`), so nothing runs at compile time except the
+  # deterministic expansion of these safe forms. This gate asserts that invariant FAIL-CLOSED: any head outside
+  # the allowlist, any module attribute, any non-Runtime remote target, or any `unquote` leak rejects the AST
+  # before it reaches the compiler.
+  @safe_local_heads MapSet.new([:-, :"->", :., :=, :__block__, :case, :cond, :def, :defp, :fn, :if, :in, :not, :try, :{}])
+
+  # module names permitted as a remote-call target in the guest AST (same confined surface as @allowed_modules).
+  @allowed_ast_modules @allowed_modules
+
   # BIFs that, if present in guest bytecode, would be an escape or a DoS primitive.
   @danger_bifs MapSet.new([
                  :apply,
@@ -60,6 +75,8 @@ defmodule TinyLasers.Gate do
 
     modname = Module.concat(TinyLasers.Gate.Compiled, "G#{System.unique_integer([:positive])}")
     quoted = Codegen.module(modname, ast, granted)
+    # pre-compile confinement audit (compile-time-execution window) before the compiler runs.
+    assert_safe_to_compile!(quoted)
     [{mod, bin}] = Code.compile_quoted(quoted)
     %{module: mod, binary: bin, granted: granted, caps: caps}
   end
@@ -161,6 +178,102 @@ defmodule TinyLasers.Gate do
     bad_bifs = Enum.filter(bifs, &MapSet.member?(@danger_bifs, &1))
     %{ext: bad_ext, bifs: bad_bifs}
   end
+
+  @doc """
+  Audit a QUOTED guest module BEFORE `Code.compile_quoted` — the compile-time-execution window that
+  `dangerous_refs/1` (which reads the *output* bytecode) cannot see. Returns a report map; a confined guest
+  has every field empty:
+
+    * `modbody_nondef` — module-body forms other than `def`/`defp` (a top-level statement or attribute would
+      run at compile time).
+    * `attrs` — `@attribute` nodes (module attributes evaluate at compile time).
+    * `unquote` — stray `unquote`/`unquote_splicing` (a splicing leak / malformed AST).
+    * `bad_remote` — remote calls to any module other than the confined Runtime.
+    * `bad_local` — local call heads outside the safe Kernel special-form/operator set (a code-executing macro
+      would appear here).
+
+  Walks EVERY node via `Macro.prewalk`, so no construct hides. Fail-closed: an unknown shape is a violation.
+  """
+  def audit_quoted(quoted) do
+    # 1) the module wrapper is FIXED structure (defmodule + name alias + a body of only def/defp). Classify the
+    #    body forms: def/defp are the guest code; a module attribute evaluates at compile time (→ attrs); any
+    #    other top-level form runs at compile time (→ modbody_nondef).
+    {modbody_nondef, modattrs, defs} =
+      case quoted do
+        {:defmodule, _, [_name, [do: body]]} ->
+          forms = case body do {:__block__, _, ss} -> ss; one -> [one] end
+
+          Enum.reduce(forms, {[], [], []}, fn form, {nd, at, df} ->
+            case form do
+              {d, _, _} when d in [:def, :defp] -> {nd, at, [form | df]}
+              {:@, _, _} = a -> {nd, [Macro.to_string(a) |> String.slice(0, 60) | at], df}
+              {other, _, _} -> {[other | nd], at, df}
+              other -> {[inspect(other) |> String.slice(0, 40) | nd], at, df}
+            end
+          end)
+
+        _ ->
+          {[:not_a_defmodule], [], []}
+      end
+
+    # 2) walk ONLY the def bodies (not the fixed wrapper), visiting every node — a code-executing head,
+    #    non-Runtime remote, stray attribute, or unquote anywhere inside is a violation.
+    init = %{attrs: modattrs, unquote: [], bad_remote: [], bad_local: []}
+
+    viol =
+      Enum.reduce(defs, init, fn {_d, _, def_args}, acc ->
+        {_, acc2} = Macro.prewalk(def_body(def_args), acc, fn node, a -> {node, audit_node(node, a)} end)
+        acc2
+      end)
+
+    Map.put(viol, :modbody_nondef, modbody_nondef)
+  end
+
+  # the do-block body of a `def`/`defp` (the head + guards are fixed structure).
+  defp def_body(def_args) do
+    case List.last(def_args) do
+      kw when is_list(kw) -> Keyword.get(kw, :do, kw)
+      other -> other
+    end
+  end
+
+  @doc "True iff `audit_quoted/1` finds no compile-time-execution risk — the guest AST is safe to compile."
+  def safe_to_compile?(quoted) do
+    r = audit_quoted(quoted)
+    r.modbody_nondef == [] and r.attrs == [] and r.unquote == [] and r.bad_remote == [] and r.bad_local == []
+  end
+
+  @doc "Raise unless the quoted guest is safe to compile. The pre-compile complement to `dangerous_refs/1`."
+  def assert_safe_to_compile!(quoted) do
+    unless safe_to_compile?(quoted) do
+      raise ArgumentError, "guest AST failed pre-compile confinement audit: #{inspect(audit_quoted(quoted))}"
+    end
+
+    quoted
+  end
+
+  defp audit_node({:@, _, _} = a, acc), do: %{acc | attrs: [Macro.to_string(a) |> String.slice(0, 60) | acc.attrs]}
+  defp audit_node({:unquote, _, _}, acc), do: %{acc | unquote: [:unquote | acc.unquote]}
+  defp audit_node({:unquote_splicing, _, _}, acc), do: %{acc | unquote: [:unquote_splicing | acc.unquote]}
+
+  # a remote call's inner dot `mod.fun` (two elements, fun an atom): the module must be the confined Runtime.
+  defp audit_node({:., _, [modast, fun]}, acc) when is_atom(fun) do
+    case resolve_mod(modast) do
+      {:ok, m} -> if MapSet.member?(@allowed_ast_modules, m), do: acc, else: %{acc | bad_remote: [{m, fun} | acc.bad_remote]}
+      :dynamic -> %{acc | bad_remote: [{:dynamic_module, fun} | acc.bad_remote]}
+    end
+  end
+
+  # a local call `head(args)` — the head must be a compile-time-safe special form / operator.
+  defp audit_node({head, _, args}, acc) when is_atom(head) and is_list(args) do
+    if MapSet.member?(@safe_local_heads, head), do: acc, else: %{acc | bad_local: [head | acc.bad_local]}
+  end
+
+  defp audit_node(_node, acc), do: acc
+
+  defp resolve_mod({:__aliases__, _, parts}) when is_list(parts), do: {:ok, Module.concat(parts)}
+  defp resolve_mod(m) when is_atom(m), do: {:ok, m}
+  defp resolve_mod(_), do: :dynamic
 
   # deep-walk the disasm term collecting every {:extfunc, m, f, a}
   defp collect_ext(term) do

@@ -48,6 +48,9 @@ defmodule TinyLasers.Gate.Js do
         end
       end
 
+    # PRE-COMPILE confinement gate: prove no code can execute during `Code.compile_quoted` (macro expansion /
+    # module-body evaluation) — the window the post-compile `dangerous_refs/1` cannot see. Fail-closed.
+    TinyLasers.Gate.assert_safe_to_compile!(quoted)
     [{mod, bin}] = Code.compile_quoted(quoted)
 
     ctx = %{caps: caps, tenant_root: "/tenant", fs: %{}}
