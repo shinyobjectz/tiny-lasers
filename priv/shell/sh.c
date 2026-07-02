@@ -1,5 +1,5 @@
-/* washy — a featured, NO-FORK shell that compiles to ONE wasm command module and runs in our in-house
- * wasm lane (clang.wasm -> wasm32-wasip1 -> AOT -> wasmtime, per-invocation). This is "bash in WASM":
+/* washy — a featured, NO-FORK shell that compiles to ONE wasm command module (clang.wasm ->
+ * wasm32-wasip1) and runs IN-PROCESS on the tiny-lasers WASM->BEAM substrate. This is "bash in WASM":
  * the only thing a real shell needs fork/exec for is pipes between processes — here pipes are done by
  * BUFFERED CHAINING in one process (run a stage to completion, feed its output to the next). No fork,
  * no exec, no wasmer. Tools are BUILTINS compiled in (busybox-style). Files are read/written over the
