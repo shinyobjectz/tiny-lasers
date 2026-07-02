@@ -463,7 +463,18 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   @doc "global namespace/property reads (Math.PI, Number.MAX_VALUE, Object.prototype)."
+  # Math functions callable as first-class VALUES (GSAP/easing libs alias `var _sin = Math.sin; _sin(x)`).
+  @math_fns ~w(floor ceil round trunc abs sqrt cbrt pow sin cos tan asin acos atan atan2 sinh cosh tanh exp
+               expm1 log log2 log10 log1p hypot max min sign random)
   def oget({:global, "Math"}, "PI"), do: :math.pi()
+  def oget({:global, "Math"}, "E"), do: :math.exp(1)
+  def oget({:global, "Math"}, "LN2"), do: :math.log(2)
+  def oget({:global, "Math"}, "LN10"), do: :math.log(10)
+  def oget({:global, "Math"}, "LOG2E"), do: 1 / :math.log(2)
+  def oget({:global, "Math"}, "LOG10E"), do: 1 / :math.log(10)
+  def oget({:global, "Math"}, "SQRT2"), do: :math.sqrt(2)
+  def oget({:global, "Math"}, "SQRT1_2"), do: :math.sqrt(0.5)
+  def oget({:global, "Math"}, name) when name in @math_fns, do: closure(fn _this, args -> math_static(name, args) end)
   def oget({:global, "Number"}, "MAX_VALUE"), do: 1.7976931348623157e308
   def oget({:global, "Number"}, "MIN_VALUE"), do: 5.0e-324
   def oget({:global, "Number"}, "MAX_SAFE_INTEGER"), do: 9_007_199_254_740_991.0
@@ -482,6 +493,9 @@ defmodule TinyLasers.Gate.Runtime do
       _ -> ""
     end
   end
+
+  # Date.now as a first-class VALUE (not just Date.now()) — GSAP does `var _getTime = Date.now; _getTime()`.
+  def oget({:global, "Date"}, "now"), do: closure(fn _this, _args -> method({:global, "Date"}, "now", []) end)
 
   def oget({:global, name}, "prototype"), do: {:proto, name}
   # a constructor's `.name` (Array.name === "Array", TypeError.name === "TypeError") — used by assert.throws
@@ -1476,13 +1490,15 @@ defmodule TinyLasers.Gate.Runtime do
   defp array_static(_, _), do: :undefined
 
 
-  defp math_static("floor", [x | _]), do: Float.floor(x / 1)
-  defp math_static("ceil", [x | _]), do: Float.ceil(x / 1)
+  # floor/ceil/round/trunc/abs pass non-finite through (JS: Math.floor(NaN)=NaN, Math.round(Infinity)=Infinity) —
+  # never crash on :nan/:infinity (GSAP's easing math feeds these through Math.round).
+  defp math_static("floor", [x | _]), do: (n = to_number(x); if is_number(n), do: Float.floor(n / 1), else: n)
+  defp math_static("ceil", [x | _]), do: (n = to_number(x); if is_number(n), do: Float.ceil(n / 1), else: n)
   # JS Math.round is half-toward-+Infinity (`round(-1.5) === -1`), i.e. floor(x + 0.5) — NOT Erlang's
   # round-half-away-from-zero.
-  defp math_static("round", [x | _]), do: Float.floor(to_number(x) + 0.5)
-  defp math_static("trunc", [x | _]), do: trunc(x) * 1.0
-  defp math_static("abs", [x | _]), do: abs(x) * 1.0
+  defp math_static("round", [x | _]), do: (n = to_number(x); if is_number(n), do: Float.floor(n + 0.5), else: n)
+  defp math_static("trunc", [x | _]), do: (n = to_number(x); if is_number(n), do: trunc(n) * 1.0, else: n)
+  defp math_static("abs", [x | _]), do: (n = to_number(x); cond do is_number(n) -> abs(n) * 1.0; n == :neg_infinity -> :infinity; true -> n end)
   defp math_static("sqrt", [x | _]), do: smath(&:math.sqrt/1, x)
   defp math_static("cbrt", [x | _]), do: (n = to_number(x); if n < 0, do: -:math.pow(-n, 1 / 3), else: :math.pow(n, 1 / 3))
   defp math_static("pow", [a, b | _]), do: js_pow(to_number(a), to_number(b))

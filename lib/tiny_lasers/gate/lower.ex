@@ -1839,7 +1839,7 @@ defmodule TinyLasers.Gate.Lower do
   defp assigned_names(_), do: []
 
   # ── helpers ──
-  @globals ~w(Object Array Function Math JSON String Number Boolean Error TypeError RangeError SyntaxError ReferenceError EvalError URIError Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
+  @globals ~w(Object Array Function Math JSON String Number Boolean Error TypeError RangeError SyntaxError ReferenceError EvalError URIError RegExp Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
   @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt)
 
   defp ident(n, scope) do
@@ -1853,7 +1853,7 @@ defmodule TinyLasers.Gate.Lower do
       n == "undefined" and not MapSet.member?(scope.locals, n) -> :undefined
       # global namespaces (Object.keys, Math.floor, JSON.parse…) and bare global functions (parseInt…). Only
       # if not shadowed by a local/func — these are plain guest values ({:global}/{:globalfn} tags), not host refs.
-      n in ~w(globalThis self window) and not MapSet.member?(scope.locals, n) -> {:{}, [], [:globalobj]}
+      n == "globalThis" and not MapSet.member?(scope.locals, n) -> {:{}, [], [:globalobj]}
       n in @globals and not (scope[:funcs] && MapSet.member?(scope.funcs, n)) -> {:{}, [], [:global, n]}
       n in @global_fns and not (scope[:funcs] && MapSet.member?(scope.funcs, n)) -> {:{}, [], [:globalfn, n]}
       # a top-level function name resolves LATE via the registry (forward refs + mutual recursion)

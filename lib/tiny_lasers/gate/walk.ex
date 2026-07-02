@@ -77,7 +77,10 @@ defmodule TinyLasers.Gate.Walk do
   defp resolve_global("undefined"), do: :undefined
   defp resolve_global("NaN"), do: :nan
   defp resolve_global("Infinity"), do: :infinity
-  defp resolve_global(n) when n in ~w(globalThis self window), do: {:globalobj}
+  # only `globalThis` is universal; `window`/`self` exist in browsers/workers, NOT in node — leaving them
+  # undefined here (unless the environment defines them) matches node, so browser-detection (`typeof window`)
+  # branches identically. `window || self || globalThis` idioms still fall through to globalThis.
+  defp resolve_global("globalThis"), do: {:globalobj}
   defp resolve_global(n) do
     granted = Process.get(:walk_granted, %{})
     cond do
