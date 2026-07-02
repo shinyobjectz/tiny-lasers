@@ -19,7 +19,7 @@ defmodule TinyLasers.Gate.Walk do
   """
   alias TinyLasers.Gate.Runtime
 
-  @globals ~w(Object Array Function Math JSON String Number Boolean
+  @globals ~w(Object Array Function Math JSON String Number Boolean RegExp
               Error TypeError RangeError SyntaxError ReferenceError EvalError URIError
               Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder
               Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)

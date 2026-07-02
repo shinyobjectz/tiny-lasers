@@ -458,7 +458,7 @@ defmodule TinyLasers.Gate.Runtime do
     cond do
       idx < 0 -> :undefined
       ascii?(s) -> (if idx < byte_size(s), do: binary_part(s, idx, 1), else: :undefined)
-      true -> (case Enum.at(String.to_charlist(s), idx) do nil -> :undefined; cp -> List.to_string([cp]) end)
+      true -> (case Enum.at(safe_charlist(s), idx) do nil -> :undefined; cp -> List.to_string([cp]) end)
     end
   end
 
@@ -475,6 +475,14 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:global, "Symbol"}, k) when k in ["iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag"],
     do: {:symbol, "@@" <> k, k}
   def oget({:global, "Symbol"}, "for"), do: closure(fn _this, args -> (d = to_str(List.first(args) || ""); {:symbol, "for:" <> d, d}) end)
+  # legacy static RegExp.$1…$9 — the last successful match's capture groups (group N; $0 isn't a thing).
+  def oget({:global, "RegExp"}, <<?$, d>>) when d in ?1..?9 do
+    case Enum.at(Process.get(:gg_re_lastmatch, []), d - ?0) do
+      s when is_binary(s) -> s
+      _ -> ""
+    end
+  end
+
   def oget({:global, name}, "prototype"), do: {:proto, name}
   # a constructor's `.name` (Array.name === "Array", TypeError.name === "TypeError") — used by assert.throws
   # and many descriptor tests.
@@ -645,14 +653,21 @@ defmodule TinyLasers.Gate.Runtime do
   defp ta_size(k) when k in [:u32, :i32, :f32], do: 4
   defp ta_size(:f64), do: 8
 
-  defp ta_enc(:u8, v), do: <<Bitwise.band(trunc(v), 0xFF)::unsigned-8>>
-  defp ta_enc(:i8, v), do: <<trunc(v)::signed-8>>
-  defp ta_enc(:u16, v), do: <<Bitwise.band(trunc(v), 0xFFFF)::unsigned-little-16>>
-  defp ta_enc(:i16, v), do: <<trunc(v)::signed-little-16>>
-  defp ta_enc(:u32, v), do: <<Bitwise.band(trunc(v), 0xFFFFFFFF)::unsigned-little-32>>
-  defp ta_enc(:i32, v), do: <<trunc(v)::signed-little-32>>
-  defp ta_enc(:f32, v), do: <<(v / 1)::float-little-32>>
-  defp ta_enc(:f64, v), do: <<(v / 1)::float-little-64>>
+  defp ta_enc(:u8, v), do: <<Bitwise.band(ta_int(v), 0xFF)::unsigned-8>>
+  defp ta_enc(:i8, v), do: <<ta_int(v)::signed-8>>
+  defp ta_enc(:u16, v), do: <<Bitwise.band(ta_int(v), 0xFFFF)::unsigned-little-16>>
+  defp ta_enc(:i16, v), do: <<ta_int(v)::signed-little-16>>
+  defp ta_enc(:u32, v), do: <<Bitwise.band(ta_int(v), 0xFFFFFFFF)::unsigned-little-32>>
+  defp ta_enc(:i32, v), do: <<ta_int(v)::signed-little-32>>
+  defp ta_enc(:f32, v), do: <<ta_float(v)::float-little-32>>
+  defp ta_enc(:f64, v), do: <<ta_float(v)::float-little-64>>
+
+  # JS typed-array element write COERCES (ToNumber then truncate/wrap) and never throws — NaN/Infinity/non-number
+  # store as 0 in integer views (`new Uint8Array([NaN])[0] === 0`). Was `trunc(v)`, which crashed on :nan/:infinity.
+  defp ta_int(v) when is_number(v), do: trunc(v)
+  defp ta_int(_), do: 0
+  defp ta_float(v) when is_number(v), do: v / 1
+  defp ta_float(_), do: 0.0
 
   defp ta_dec(:u8, <<v::unsigned-8>>), do: v * 1.0
   defp ta_dec(:i8, <<v::signed-8>>), do: v * 1.0
@@ -894,6 +909,7 @@ defmodule TinyLasers.Gate.Runtime do
           :null
 
         [{ms, _} | _] = idxs ->
+          re_setlast(idxs, s)
           caps = Enum.map(idxs, fn {i, l} -> if i < 0, do: :undefined, else: binary_part(s, i, l) end)
           avec(caps, match_props(re, s, ms))
       end
@@ -928,13 +944,21 @@ defmodule TinyLasers.Gate.Runtime do
   defp relast_get(r), do: Process.get({:gg_relast, r}, 0)
   defp relast_set(r, n), do: Process.put({:gg_relast, r}, max(n, 0))
 
+  # Legacy static `RegExp.$1`…`RegExp.$9`: after any successful match, store the capture groups so
+  # `RegExp.$1` reads group 1 (linkedom's DOCTYPE parse: `const {$1, $4, $6} = RegExp`).
+  defp re_setlast(idxs, str) do
+    caps = Enum.map(idxs, fn {i, l} -> if i < 0, do: "", else: binary_part(str, i, l) end)
+    Process.put(:gg_re_lastmatch, caps)
+    idxs
+  end
+
   def method({:regex, re, _src, flags} = r, "test", [s | _]) do
     str = to_str(s)
     global = String.contains?(flags, "g") or String.contains?(flags, "y")
     start = if global, do: relast_get(r), else: 0
 
     case start <= byte_size(str) && Regex.run(re, str, offset: start, return: :index) do
-      [{ms, ml} | _] -> (if global, do: relast_set(r, ms + ml)); true
+      [{ms, ml} | _] = idxs -> re_setlast(idxs, str); (if global, do: relast_set(r, ms + ml)); true
       _ -> (if global, do: relast_set(r, 0)); false
     end
   end
@@ -948,6 +972,7 @@ defmodule TinyLasers.Gate.Runtime do
 
     case start <= byte_size(str) && Regex.run(re, str, offset: start, return: :index) do
       [{ms, ml} | _] = idxs ->
+        re_setlast(idxs, str)
         caps = Enum.map(idxs, fn {i, l} -> if i < 0, do: :undefined, else: binary_part(str, i, l) end)
         if global, do: relast_set(r, ms + ml)
         avec(caps, match_props(re, str, ms))
@@ -1026,7 +1051,7 @@ defmodule TinyLasers.Gate.Runtime do
     cond do
       idx < 0 -> :nan
       ascii?(s) -> (if idx < byte_size(s), do: :binary.at(s, idx) * 1.0, else: :nan)
-      true -> (case Enum.at(String.to_charlist(s), idx) do nil -> :nan; cp -> cp * 1.0 end)
+      true -> (case Enum.at(safe_charlist(s), idx) do nil -> :nan; cp -> cp * 1.0 end)
     end
   end
 
@@ -1704,8 +1729,25 @@ defmodule TinyLasers.Gate.Runtime do
     Enum.slice(list, start, max(stop - start, 0))
   end
 
-  # code-point count (JS string length) with an all-ASCII fast path.
-  defp str_len(s), do: if ascii?(s), do: byte_size(s), else: length(String.to_charlist(s))
+  # code-point count (JS string length) with an all-ASCII fast path. JS strings can hold ARBITRARY code units
+  # (e.g. linkedom packs binary entity/decode tables into strings via fromCharCode), which are not valid UTF-8 —
+  # `String.to_charlist` raises on those, so fall back to the byte count instead of crashing the runtime.
+  defp str_len(s) do
+    cond do
+      ascii?(s) -> byte_size(s)
+      true -> length(safe_charlist(s))
+    end
+  end
+
+  # code points for indexing/slicing. For strings holding arbitrary code units (linkedom's packed binary
+  # entity/decode tables) that aren't valid UTF-8, treat each byte as a code unit (JS "code unit 0–255"
+  # semantics) rather than raising.
+  defp safe_charlist(s) do
+    case :unicode.characters_to_list(s) do
+      l when is_list(l) -> l
+      _ -> :binary.bin_to_list(s)
+    end
+  end
   # all-ASCII check (the common case → the byte ops are already correct): no byte has the high bit set.
   defp ascii?(<<>>), do: true
   defp ascii?(<<b, rest::binary>>) when b < 128, do: ascii?(rest)
@@ -1733,7 +1775,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   defp cp_sub(s, start, len) do
-    if ascii?(s), do: binary_part(s, start, len), else: (String.to_charlist(s) |> Enum.slice(start, len) |> List.to_string())
+    if ascii?(s), do: binary_part(s, start, len), else: (safe_charlist(s) |> Enum.slice(start, len) |> List.to_string())
   end
 
   defp str_pad(s, len, rest, side) do
