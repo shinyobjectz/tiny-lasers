@@ -2214,8 +2214,39 @@ defmodule TinyLasers.Gate.Runtime do
   defp bi_int(n) when is_float(n), do: trunc(n)
   defp bi_int(true), do: 1
   defp bi_int(false), do: 0
-  defp bi_int(s) when is_binary(s), do: (case Integer.parse(String.trim(s)) do {i, ""} -> i; _ -> 0 end)
+  defp bi_int(s) when is_binary(s), do: bi_str(s)
+  # BigInt(obj): ToPrimitive first (Symbol.toPrimitive → valueOf → toString), then coerce the primitive.
+  defp bi_int({:cell, _} = o), do: bi_int(to_primitive(o))
   defp bi_int(_), do: 0
+
+  # a bigint string literal: empty → 0, radix prefixes 0x/0o/0b, else decimal (all whitespace-trimmed).
+  defp bi_str(s) do
+    t = String.trim(s)
+
+    cond do
+      t == "" -> 0
+      String.match?(t, ~r/^0[xX][0-9a-fA-F]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 16)
+      String.match?(t, ~r/^0[oO][0-7]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 8)
+      String.match?(t, ~r/^0[bB][01]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 2)
+      true -> (case Integer.parse(t) do {i, ""} -> i; _ -> 0 end)
+    end
+  end
+
+  # ToPrimitive(obj, "number"/"default"): Symbol.toPrimitive, then valueOf, then toString — the first that
+  # returns a non-object primitive wins.
+  defp to_primitive({:cell, _} = o) do
+    Enum.reduce_while(["@@sym:@@toPrimitive", "valueOf", "toString"], :undefined, fn m, _ ->
+      f = oget(o, m)
+
+      case (if match?({:fn, _}, f) or match?({:host, _}, f), do: invoke(f, o, []), else: :__skip) do
+        {:cell, _} -> {:cont, :undefined}
+        :__skip -> {:cont, :undefined}
+        prim -> {:halt, prim}
+      end
+    end)
+  end
+
+  defp to_primitive(v), do: v
 
   defp nullish?(:null), do: true
   defp nullish?(:undefined), do: true

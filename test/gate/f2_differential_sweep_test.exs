@@ -45,6 +45,9 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"match-index-input", ~S'var m = "12-34".match(/(\d+)-(\d+)/); print(m[0] + "|" + m[1] + "|" + m[2] + "|" + m.index + "|" + m.input);'},
     {"match-named-groups", ~S'var m = "2024-06".match(/(?<y>\d{4})-(?<mo>\d{2})/); print(m.groups.y + "|" + m.groups.mo + "|" + (m.groups.missing === undefined));'},
     {"exec-index-groups", ~S'var re = /(?<a>\w)(\d)/; var m = re.exec("x5"); print(m[0] + "," + m[1] + "," + m[2] + "," + m.index + "," + m.groups.a);'},
+    # BigInt coercion: radix-prefix strings + object ToPrimitive (Symbol.toPrimitive → valueOf → toString).
+    {"bigint-radix-strings", ~S'print(BigInt("0x1F") + "," + BigInt("0b101") + "," + BigInt("0o17") + "," + BigInt("") + "," + BigInt("  42  "));'},
+    {"bigint-toprimitive", ~S'var o = {}; o[Symbol.toPrimitive] = function(){ return 42n; }; print(BigInt(o) + "," + BigInt({ valueOf: function(){ return 5; } }) + "," + BigInt({ toString: function(){ return "7"; } }));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
