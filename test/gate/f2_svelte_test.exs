@@ -1,23 +1,22 @@
 defmodule TinyLasers.Gate.F2SvelteTest do
   @moduledoc """
-  **F2 rung: the real svelte 5 compiler compiles a component byte-identical to node.**
+  **F2 rung: the real svelte 5 compiler compiles a component byte-identical to node, BOTH lanes, confined.**
 
   The svelte@5.56.4 compiler (esbuild-bundled to `svelte/svelte_bundle.cjs`, ~1.2MB) runs on the BEAM. It
   compiles a component exercising runes ($props with defaults, $state, an event handler that reassigns state,
-  and an `{#each}` block) to CLIENT js, and the result is compared to the golden captured from real svelte
-  under node.
+  and an `{#each}` block) to CLIENT js, and the result is compared BYTE-FOR-BYTE to the golden captured from
+  real svelte under node, in both frontends:
 
-  Two lanes:
+    * INTERPRETER (`Walk`): byte-identical to the golden.
 
-    * INTERPRETER (`Walk`): byte-identical to the golden. This drives the compiler's full pipeline — its
-      bundled acorn (parse), scope/binding analysis + runes detection, the reactive transform (use-site
-      `$.get`/`$.set` rewriting, prop getters), and the esrap printer — proving the shared Runtime handles
-      real svelte end to end. This is the locked assertion.
+    * COMPILED (`Lower` → native `.beam`, parallel multi-module): byte-identical to the golden AND every module
+      is confined (`dangerous_refs == %{ext: [], bifs: []}`).
 
-    * COMPILED (`Lower` → native `.beam`, parallel multi-module): every module is confined
-      (`dangerous_refs == %{ext: [], bifs: []}`) and the compile runs, but the client template-node builder
-      diverges from the interpreter (empty `$.from_html` template) — a use-site codegen bug tracked in bd,
-      NOT yet byte-identical. Asserted here for COMPILATION + CONFINEMENT only.
+  Both drive the compiler's full pipeline — its bundled acorn (parse), scope/binding analysis + runes
+  detection, the reactive transform (use-site `$.get`/`$.set` rewriting, prop getters, sibling navigation),
+  and the esrap printer — proving the shared Runtime handles real svelte end to end. The template-node builder
+  and multi-child sibling chain rely on named-function-expression self-recursion and per-invocation function
+  declarations (svelte's `t()` walker and recursive `sP()`), which Lower binds via per-evaluation boxes.
   """
   use ExUnit.Case, async: false
 
@@ -63,12 +62,15 @@ defmodule TinyLasers.Gate.F2SvelteTest do
       assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled module #{tag} not confined"
     end
 
-    # compiled lane runs + emits SVELTE_OK (byte-identity pending — see moduledoc / bd).
+    # compiled lane: byte-identical to the golden.
     {:main, main, _} = List.keyfind(mods, :main, 0)
     Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
     for {tag, m, _} <- mods, tag != :main, do: apply(m, :__gg_register, [])
     try do apply(main, :run, []) catch :throw, _ -> :ok end
     comp_out = Runtime.__output()
-    assert Enum.any?(comp_out, &String.starts_with?(&1, "SVELTE_OK[")), "compiled lane produced no SVELTE_OK"
+    comp_ok = Enum.find(comp_out, &String.starts_with?(&1, "SVELTE_OK["))
+    assert comp_ok, "compiled lane produced no SVELTE_OK; out=#{inspect(Enum.take(comp_out, 4))}"
+    comp_code = comp_ok |> String.replace_prefix("SVELTE_OK[", "") |> String.replace_prefix("5.56.4|", "") |> String.replace_suffix("]", "")
+    assert String.trim(comp_code) == String.trim(golden), "compiled svelte output mismatch"
   end
 end

@@ -277,10 +277,17 @@ defmodule TinyLasers.Gate.Lower do
   # top-level (and nested) function declarations register in the late-bound function registry, so forward
   # references and mutual recursion work regardless of source order.
   defp stmt(%{"type" => "FunctionDeclaration", "id" => %{"name" => n}} = f, scope) do
-    key = fnkey(n, f)
-    scope = %{scope | funcs: MapSet.put(scope[:funcs] || MapSet.new(), n), fnmap: Map.put(scope[:fnmap] || %{}, n, key)}
-    fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true)
-    {quote(do: unquote(@runtime).greg_set(unquote(key), unquote(fq))), scope}
+    # a function declaration nested inside another function (name pre-boxed by func/6) is PER-INVOCATION: bind
+    # its box. A top-level (program-scope) declaration uses the greg registry (runs once, cross-module late bind).
+    if scope[:boxed] && MapSet.member?(scope.boxed, n) do
+      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true)
+      {quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(fq))), scope}
+    else
+      key = fnkey(n, f)
+      scope = %{scope | funcs: MapSet.put(scope[:funcs] || MapSet.new(), n), fnmap: Map.put(scope[:fnmap] || %{}, n, key)}
+      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true)
+      {quote(do: unquote(@runtime).greg_set(unquote(key), unquote(fq))), scope}
+    end
   end
 
   defp stmt(%{"type" => "ReturnStatement", "argument" => arg}, scope) do
@@ -1400,21 +1407,25 @@ defmodule TinyLasers.Gate.Lower do
   end
 
   # a NAMED function expression binds its own name inside its body (`(function rec(n){ …rec(n-1)… })`) —
-  # svelte's minified walker recurses this way. Register the closure under a start-unique greg key and let
-  # the body resolve the name late-bound (same registry mechanism as declarations); outer scope unaffected.
+  # svelte's minified walker recurses this way. The self-name lives in a PER-EVALUATION box captured by the
+  # closure (mirroring Walk): a shared greg key keyed by name+position is WRONG, because the SAME expression
+  # evaluated by multiple/nested invocations (svelte runs its `(function e3(){…})` walker once per pass) would
+  # clobber each other's self-reference, and an outer walk's nested `visit` closure would recurse into a dead
+  # inner walk's function — which silently truncated the compiled svelte template walk.
   defp expr(%{"type" => "FunctionExpression", "id" => %{"name" => nm}} = f, scope) when is_binary(nm) do
-    key = fnkey(nm, f)
-
     bscope =
       scope
-      |> Map.put(:funcs, MapSet.put(scope[:funcs] || MapSet.new(), nm))
-      |> Map.put(:fnmap, Map.put(scope[:fnmap] || %{}, nm, key))
+      |> Map.put(:locals, MapSet.put(scope[:locals] || MapSet.new(), nm))
+      |> Map.put(:boxed, MapSet.put(scope[:boxed] || MapSet.new(), nm))
 
     q = func(f["params"], f["body"], bscope, f["async"] == true, false, f["generator"] == true)
+    ret = Macro.var(:__ggnfe, __MODULE__)
 
     quote do
-      unquote(@runtime).greg_set(unquote(key), unquote(q))
-      unquote(@runtime).greg_get(unquote(key))
+      unquote(lvar(nm)) = unquote(@runtime).box(:undefined)
+      unquote(ret) = unquote(q)
+      unquote(@runtime).box_set(unquote(lvar(nm)), unquote(ret))
+      unquote(ret)
     end
   end
 
@@ -1455,22 +1466,45 @@ defmodule TinyLasers.Gate.Lower do
     # hoist this function's `var` declarations (JS function scope), pre-bound to :undefined.
     bodyvars = collect_vars(body) |> Enum.uniq() |> Enum.reject(&(&1 in names))
     uses_args? = "arguments" in all_idents(body)
+
+    # SMALL function bodies box their function declarations per-invocation (see stmt(FunctionDeclaration)) — a
+    # recursive/re-entrant body like svelte's `sP` must not share `l2`/`c2` across invocations via a greg key.
+    # HUGE bodies keep fndecls on the greg registry: they are run-once (top-level UMD callbacks, module init),
+    # so no self-clobbering, and boxing hundreds of them (or threading them through the exploded env tuple)
+    # blows BEAM's per-function register limit. Threshold = the explosion threshold.
+    huge_body? =
+      match?(%{"type" => "BlockStatement"}, body) and
+        is_integer(body["start"]) and is_integer(body["end"]) and
+        body["end"] - body["start"] > @explode_min_bytes
+
+    box_fndecls? = not huge_body?
     inner0 = Enum.reduce(names ++ bodyvars, scope.locals, &MapSet.put(&2, &1))
     inner1 = if uses_args?, do: MapSet.put(inner0, "arguments"), else: inner0
-    # a function declared directly in this body binds to the registry (greg), shadowing any inherited local of
-    # the same name (babel class IIFEs: `var K = (function(){ function K(){} return K })()`).
+    # a function declared directly in THIS function's body is PER-INVOCATION: each call gets a fresh box holding
+    # its closure, captured by sibling/nested closures. A shared greg key (keyed by name+position) would be
+    # clobbered when the SAME function is called recursively/nested — svelte's `function sP(){ function l2(){} }`
+    # walker is called recursively, and the inner call's l2 overwrote the outer call's, so the outer resumed
+    # with the inner's captured state (dropped sibling declarations). Top-level function declarations (program
+    # scope, not inside any function) keep greg — they run once and support cross-module late binding.
     fndecls = fndecl_names(body)
-    inner = MapSet.difference(inner1, fndecls)
+    inner = if box_fndecls?, do: MapSet.union(inner1, fndecls), else: MapSet.difference(inner1, fndecls)
 
     # a param/var captured by a nested function AND mutated is BOXED so the closures share the mutation.
     boxed = boxed_set(names ++ bodyvars, body)
 
+    # per-invocation boxes for this body's own function declarations (created undefined, set at the decl site).
+    fndecl_box_inits =
+      if box_fndecls?,
+        do: for(v <- MapSet.to_list(fndecls), do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined))),
+        else: []
+
     hoistq =
-      Enum.map(bodyvars, fn v ->
-        if MapSet.member?(boxed, v),
-          do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined)),
-          else: quote(do: unquote(lvar(v)) = :undefined)
-      end)
+      fndecl_box_inits ++
+        Enum.map(bodyvars, fn v ->
+          if MapSet.member?(boxed, v),
+            do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined)),
+            else: quote(do: unquote(lvar(v)) = :undefined)
+        end)
 
     argbind =
       if uses_args?,
@@ -1481,7 +1515,19 @@ defmodule TinyLasers.Gate.Lower do
     # drop shadowed names from the inherited boxed set before unioning this scope's boxed vars.
     shadow = MapSet.union(MapSet.new(names ++ bodyvars), fndecls)
     inherited = MapSet.difference(scope[:boxed] || MapSet.new(), shadow)
-    bscope = %{scope | locals: inner, boxed: MapSet.difference(MapSet.union(inherited, boxed), fndecls)}
+    # boxed fndecls (non-exploded bodies) join this scope's boxed set and SHADOW any inherited greg function of
+    # the same name; exploded bodies keep fndecls on greg (original behavior).
+    bscope =
+      if box_fndecls? do
+        %{
+          scope
+          | locals: inner,
+            boxed: MapSet.union(MapSet.union(inherited, boxed), fndecls),
+            funcs: MapSet.difference(scope[:funcs] || MapSet.new(), fndecls)
+        }
+      else
+        %{scope | locals: inner, boxed: MapSet.difference(MapSet.union(inherited, boxed), fndecls)}
+      end
 
     # a boxed PARAM-bound name needs its box pre-created before the (possibly destructuring) bind writes it.
     param_box_inits =
@@ -1608,6 +1654,9 @@ defmodule TinyLasers.Gate.Lower do
   # slice throws gg_return, which unwinds through the slice call into the main closure's catch. Only active
   # under module_quoted (the :gg_lower_defs accumulator collects the sibling defs).
   defp explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, fnid, params) do
+    # an exploded body keeps its function declarations on the greg registry (func/6 leaves them out of boxed),
+    # so they are NOT per-invocation boxes and must NOT be threaded through the env tuple — threading hundreds
+    # blows BEAM's per-function register limit, and a run-once exploded body can't clobber its own greg.
     own =
       (Enum.uniq(names ++ bodyvars) |> Enum.reject(&MapSet.member?(fndecls, &1))) ++
         if(uses_args?, do: ["arguments"], else: [])

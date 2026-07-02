@@ -130,7 +130,13 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"getOwnPropertyDescriptors-merge", ~S'function merge(a, b) { var o = {}, d = Object.getOwnPropertyDescriptors(a); for (var k in d) Object.defineProperty(o, k, d[k]); for (var k2 in b) o[k2] = b[k2]; return o; } var n = merge({ type: "F", id: "x", body: 1 }, { id: "y" }); print(n.type + "," + n.id + "," + n.body);'},
     {"object-hasOwn", ~S'var t = { count: 1 }; var i = Object.hasOwn(t, "count") ? t.count : null; var j = Object.hasOwn(t, "nope") ? 1 : null; print(i + "," + j);'},
     {"typeof-lazy-init", ~S'function _t(o) { return _t = "function" == typeof Symbol ? function(o) { return typeof o; } : function(o) { return typeof o; }, _t(o); } print(_t(5) + "," + _t("s") + "," + _t({}));'},
-    {"builder-aliased-fields", ~S'class B { nodes = []; #h = this.nodes; push(n) { this.#h.push(n); } html() { return this.nodes.join(""); } } var s = { t: new B() }; var s2 = { ...s }; s2.t.push("<h1>"); s2.t.push("x"); print(s.t.html());'}
+    {"builder-aliased-fields", ~S'class B { nodes = []; #h = this.nodes; push(n) { this.#h.push(n); } html() { return this.nodes.join(""); } } var s = { t: new B() }; var s2 = { ...s }; s2.t.push("<h1>"); s2.t.push("x"); print(s.t.html());'},
+
+    # per-invocation named-function-expression + nested-function-declaration self-reference (svelte's recursive
+    # `t()` walker and `sP()`): a shared registry key clobbers across re-entrant invocations, so these MUST bind
+    # a fresh box each evaluation. The nested-closure capture + re-entrancy is the exact shape that failed.
+    {"nfe-reentrant-capture", ~S'function walk(node, visit) { var self = function w(n) { var acc = []; if (n.kids) for (var k of n.kids) acc.push(w(k)); return visit(n) + "[" + acc.join(",") + "]"; }; return self(node); } var count = function label(x) { return x.c ? "N" + label(x.c) : "L"; }; print(walk({ v: "a", kids: [{ v: "b" }, { v: "c", kids: [{ v: "d" }] }] }, function(n) { return n.v; }) + "|" + count({ c: { c: {} } }));'},
+    {"nested-fndecl-reentrant", ~S'function outer(depth, acc) { var items = []; function push(x) { items.push(x); } function build() { push("d" + depth); if (depth > 0) outer(depth - 1, items); return items; } build(); if (acc) for (var it of items) acc.push(it); return items.length; } print(outer(2, null));'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do
