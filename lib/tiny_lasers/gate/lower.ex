@@ -1033,9 +1033,18 @@ defmodule TinyLasers.Gate.Lower do
     end
   end
 
-  # `a?.b()` / `a?.[k]` parse as ChainExpression wrapping the call/member (whose own `optional` flags
-  # short-circuit) — unwrap, or the catch-all would silently lower the whole chain to undefined.
-  defp expr(%{"type" => "ChainExpression", "expression" => e}, scope), do: expr(e, scope)
+  # `a?.b.c` short-circuits the ENTIRE chain when a link is nullish — an optional link calls
+  # `Runtime.optchain_miss()` (throws {:gg_optchain}); this boundary catches it and yields undefined, so
+  # `n?.b.c` with nullish `n` is undefined rather than `undefined.c` (now a TypeError).
+  defp expr(%{"type" => "ChainExpression", "expression" => e}, scope) do
+    quote do
+      try do
+        unquote(expr(e, scope))
+      catch
+        :throw, {:gg_optchain} -> :undefined
+      end
+    end
+  end
 
   # method call `recv.name(args)` → confined Runtime.method dispatch. A mutating method (push/pop/…) returns
   # `{:mut, new_recv, result}`; when the receiver is an identifier we rebind it (JS in-place mutation).
@@ -1054,10 +1063,10 @@ defmodule TinyLasers.Gate.Lower do
         unquote(base) = unquote(recvq)
 
         if unquote(base) in [:undefined, :null] do
-          :undefined
+          unquote(@runtime).optchain_miss()
         else
           if unquote(fn_guard) do
-            :undefined
+            unquote(@runtime).optchain_miss()
           else
             case unquote(@runtime).method(unquote(base), unquote(name), unquote(argq)) do
               {:mut, _, r} -> r
@@ -1140,7 +1149,7 @@ defmodule TinyLasers.Gate.Lower do
 
       quote do
         unquote(base) = unquote(oq)
-        if unquote(base) in [:undefined, :null], do: :undefined, else: unquote(@runtime).oget(unquote(base), unquote(kq))
+        if unquote(base) in [:undefined, :null], do: unquote(@runtime).optchain_miss(), else: unquote(@runtime).oget(unquote(base), unquote(kq))
       end
     else
       quote(do: unquote(@runtime).oget(unquote(oq), unquote(kq)))
@@ -1393,7 +1402,7 @@ defmodule TinyLasers.Gate.Lower do
 
       quote do
         unquote(f) = unquote(expr(c["callee"], scope))
-        if unquote(@runtime).is_nullish(unquote(f)), do: :undefined, else: unquote(@runtime).call(unquote(f), unquote(argq))
+        if unquote(@runtime).is_nullish(unquote(f)), do: unquote(@runtime).optchain_miss(), else: unquote(@runtime).call(unquote(f), unquote(argq))
       end
     else
       quote(do: unquote(@runtime).call(unquote(expr(c["callee"], scope)), unquote(argq)))

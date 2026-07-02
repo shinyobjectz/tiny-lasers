@@ -67,6 +67,9 @@ defmodule TinyLasers.Gate.Js do
             Runtime.drain_microtasks()
             r
           catch
+            # an uncaught guest `throw` (incl. a TypeError from null/undefined access) is a GUEST error, not a
+            # host crash — the thrown value never escaped the confined term domain.
+            :throw, {:gg_throw, v} -> {:guest_error, v}
             :throw, {:gg_guest_error, r} -> {:guest_error, r}
             :throw, {:gg_return, v} -> {:ok, v}
             kind, e -> {:crash, kind, e}

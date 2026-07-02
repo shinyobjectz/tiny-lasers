@@ -287,9 +287,12 @@ defmodule TinyLasers.Gate.Walk do
   defp eval(%{"type" => t} = f, env) when t in ["FunctionExpression", "ArrowFunctionExpression"],
     do: make_fn(f["params"], f["body"], env, f["async"] == true, t == "ArrowFunctionExpression", f["generator"] == true, f["id"] && f["id"]["name"])
 
-  # `a?.b()` / `a?.[k]` parse as ChainExpression wrapping the call/member (whose own `optional` flags
-  # short-circuit) — unwrap, or the catch-all would silently evaluate the whole chain to undefined.
-  defp eval(%{"type" => "ChainExpression", "expression" => e}, env), do: eval(e, env)
+  # `a?.b.c` short-circuits the ENTIRE chain when a link is nullish — NOT just the `?.` step. An optional link
+  # throws `{:gg_optchain}`; this ChainExpression boundary catches it and yields undefined (so `n?.b.c` with
+  # nullish `n` is undefined, never `undefined.c` which now throws a TypeError).
+  defp eval(%{"type" => "ChainExpression", "expression" => e}, env) do
+    try do eval(e, env) catch :throw, {:gg_optchain} -> :undefined end
+  end
 
   defp eval(%{"type" => "YieldExpression", "argument" => a} = y, env) do
     v = if a, do: eval(a, env), else: :undefined
@@ -349,7 +352,7 @@ defmodule TinyLasers.Gate.Walk do
   defp eval_member(%{"object" => o, "property" => p} = m, env) do
     obj = eval(o, env)
     if m["optional"] && Runtime.is_nullish(obj) do
-      :undefined
+      throw({:gg_optchain})
     else
       key = if m["computed"], do: eval(p, env), else: key_of(p)
       Runtime.oget(obj, key)
@@ -373,12 +376,12 @@ defmodule TinyLasers.Gate.Walk do
   defp eval_call(%{"type" => "MemberExpression"} = m, args, env, optional) do
     obj = eval(m["object"], env)
     if (m["optional"] || optional) && Runtime.is_nullish(obj) do
-      :undefined
+      throw({:gg_optchain})
     else
       key = if m["computed"], do: eval(m["property"], env), else: key_of(m["property"])
-      # `o.f?.()` — the ?. guards the FUNCTION, not the receiver: a missing property yields undefined.
+      # `o.f?.()` — the ?. guards the FUNCTION, not the receiver: a missing property short-circuits the chain.
       if optional && Runtime.optcall_missing?(obj, key) do
-        :undefined
+        throw({:gg_optchain})
       else
         Runtime.method(obj, key, eval_args(args, env))
       end
@@ -387,7 +390,7 @@ defmodule TinyLasers.Gate.Walk do
   defp eval_call(callee, args, env, optional) do
     f = eval(callee, env)
     a = eval_args(args, env)
-    if optional && Runtime.is_nullish(f), do: :undefined, else: Runtime.call(f, a)
+    if optional && Runtime.is_nullish(f), do: throw({:gg_optchain}), else: Runtime.call(f, a)
   end
 
   defp eval_args(args, env) do

@@ -254,6 +254,9 @@ defmodule TinyLasers.Gate.Runtime do
   def oput({:arr, _} = a, k, v), do: arr_put(a, k, v)
   # property write on a primitive is a silent no-op (JS sloppy mode) — return the RECEIVER unchanged so a
   # root-identifier rebind doesn't replace a number/string/undefined with an empty object.
+  # writing a property OF null/undefined is a TypeError (spec). Other non-objects silently no-op (sloppy).
+  def oput(:undefined, k, _v), do: type_error("Cannot set properties of undefined (setting '#{key_str(k)}')")
+  def oput(:null, k, _v), do: type_error("Cannot set properties of null (setting '#{key_str(k)}')")
   def oput(not_obj, _k, _v), do: not_obj
 
   # write to an array IN PLACE: numeric key → element slot; named key → the props map. Returns the same handle.
@@ -457,6 +460,9 @@ defmodule TinyLasers.Gate.Runtime do
     do: {:symbol, "@@" <> k, k}
   def oget({:global, "Symbol"}, "for"), do: closure(fn _this, args -> (d = to_str(List.first(args) || ""); {:symbol, "for:" <> d, d}) end)
   def oget({:global, name}, "prototype"), do: {:proto, name}
+  # a constructor's `.name` (Array.name === "Array", TypeError.name === "TypeError") — used by assert.throws
+  # and many descriptor tests.
+  def oget({:global, name}, "name"), do: name
   # a global static method read as a first-class value: return a closure bound to the method dispatcher so
   # `var f = Object.defineProperty; f(o,k,d)` works (esbuild wrapper pattern). Gated to known statics so
   # `typeof Object.somethingElse` stays "undefined".
@@ -476,6 +482,10 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:proto, _}, meth) when is_binary(meth), do: closure(fn this, args -> method(this, meth, args) end)
   def oget({:proto, _}, _), do: :undefined
 
+  # reading a property OF null/undefined is a TypeError (spec) — NOT lenient. Other non-objects (numbers,
+  # booleans) box to a wrapper with no such property → undefined, so they stay lenient below.
+  def oget(:undefined, k), do: type_error("Cannot read properties of undefined (reading '#{key_str(k)}')")
+  def oget(:null, k), do: type_error("Cannot read properties of null (reading '#{key_str(k)}')")
   def oget(_not_obj, _k), do: :undefined
 
   @doc "Spread-merge b's own keys into cell a in order (`{...a, ...b}` / Object.assign). Mutates & returns a."
@@ -833,12 +843,14 @@ defmodule TinyLasers.Gate.Runtime do
   def method(s, "match", [{:regex, re, _, _} = rx]) when is_binary(s) do
     if global?(rx) do
       case Regex.scan(re, s, capture: :first) |> List.flatten() do
-        [] -> :undefined
+        [] -> :null
         list -> avec(list)
       end
     else
       case Regex.run(re, s) do
-        nil -> :undefined
+        # spec: String.prototype.match returns `null` on no-match (NOT undefined) — `x.match(re) === null`
+        # guards are load-bearing (marked's fences: `null === (u = t.match(re)) ? n : u[1]`).
+        nil -> :null
         caps -> avec(Enum.map(caps, fn c -> c || :undefined end))
       end
     end
@@ -1494,8 +1506,12 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
-  # calling a method that doesn't resolve (incl. on `:undefined`, e.g. `os.cmd(...)`) is a guest TypeError,
-  # NOT a host escape — the receiver was never a host reference.
+  # a method call on null/undefined fails at the PROPERTY read (spec: `Cannot read properties of …`).
+  def method(:undefined, nm, _a), do: type_error("Cannot read properties of undefined (reading '#{key_str(nm)}')")
+  def method(:null, nm, _a), do: type_error("Cannot read properties of null (reading '#{key_str(nm)}')")
+
+  # calling a method that doesn't resolve is a guest TypeError, NOT a host escape — the receiver was never a
+  # host reference. Throw a real TypeError OBJECT so a guest catch sees `e instanceof TypeError`.
   def method(r, nm, _a) do
     if System.get_env("GAPLOG") do
       extra = if System.get_env("GAPTRACE") do
@@ -1505,7 +1521,7 @@ defmodule TinyLasers.Gate.Runtime do
       else "" end
       IO.puts(:stderr, "GAP method #{inspect(nm)} on #{inspect(r) |> String.slice(0, 40)} #{extra}")
     end
-    if System.get_env("GAPSOFT"), do: :undefined, else: guest_error("not a function")
+    if System.get_env("GAPSOFT"), do: :undefined, else: type_error("#{key_str(nm)} is not a function")
   end
 
 
@@ -1824,7 +1840,18 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   def construct({:global, err}, args) when err in ["Error", "TypeError", "RangeError", "SyntaxError"],
-    do: cell_new([{"message", to_str(List.first(args) || "")}, {"name", err}])
+    do: mk_error(err, to_str(List.first(args) || ""))
+
+  # an error object carries its `.constructor` (the global error fn) so `thrown.constructor === TypeError`
+  # holds (test262's assert.throws checks constructor IDENTITY, not just `.name`), and its prototype is linked
+  # to `{:proto, err}` so `e instanceof TypeError` / `e instanceof Error` and `e.toString()` work.
+  defp mk_error(err, msg) do
+    {:cell, id} = c = cell_new([{"message", msg}, {"name", err}, {"constructor", {:global, err}}])
+    Process.put({:gg_instproto, id}, {:proto, err})
+    c
+  end
+
+  @error_names ~w(Error TypeError RangeError SyntaxError ReferenceError EvalError URIError)
 
   # `new Array(n)` with a single numeric arg is a length-n hole array (rollup: `new Array(list.length)`),
   # NOT a one-element array containing n.
@@ -2079,6 +2106,15 @@ defmodule TinyLasers.Gate.Runtime do
   def binop(:in, k, obj), do: has_own(obj, k)
   # `x instanceof Ctor` — walk x's prototype chain (from `new`/Object.create linkage) for Ctor.prototype.
   def binop(:instanceof, {:cell, id}, {:fn, _} = ctor), do: instanceof_chain(Process.get({:gg_instproto, id}), fn_proto(ctor))
+  # instanceof against a built-in constructor: match the cell's `{:proto, name}` chain; every error is also
+  # `instanceof Error`.
+  def binop(:instanceof, {:cell, id}, {:global, name}) do
+    case Process.get({:gg_instproto, id}) do
+      {:proto, ^name} -> true
+      {:proto, sub} when name == "Error" and sub in @error_names -> true
+      proto -> instanceof_chain(proto, {:proto, name})
+    end
+  end
   def binop(:instanceof, _a, _b), do: false
   # bitwise ops — JS coerces via ToInt32; result is a signed 32-bit int returned as a float.
   def binop(:band, a, b), do: bitop(a, b, &Bitwise.band/2)
@@ -2306,9 +2342,21 @@ defmodule TinyLasers.Gate.Runtime do
     throw({:gg_guest_error, reason})
   end
 
+  @doc "Throw a real TypeError OBJECT (not a bare string) so a guest `catch(e)` sees `e instanceof TypeError`
+  and `e.constructor === TypeError` (test262's assert.throws checks constructor identity)."
+  def type_error(msg) do
+    if System.get_env("TETRACE"), do: IO.puts(:stderr, "TE @#{inspect(Process.get(:gg_pos))} #{msg}")
+    throw({:gg_throw, mk_error("TypeError", msg)})
+  end
+
   @doc "Guest `return` — throws to the enclosing function-body catch. Routed through the Runtime so the
   emitted guest module references no external module (keeps the 'only Runtime' confinement invariant literal)."
   def ret(v), do: throw({:gg_return, v})
+
+  @doc "Short-circuit an optional chain (`a?.b.c` with nullish `a`) — thrown from a nullish optional link and
+  caught at the ChainExpression boundary, yielding undefined for the WHOLE chain. Routed through the Runtime so
+  the emitted guest code never contains a bare `throw` (keeps the 'only Runtime' + pre-compile-audit invariant)."
+  def optchain_miss, do: throw({:gg_optchain})
 
   @doc "Loop break/continue — routed through the Runtime so the guest references no :erlang.throw (confinement)."
   def brk(tag), do: throw({:gg_break, tag})

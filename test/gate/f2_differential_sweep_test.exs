@@ -25,6 +25,14 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"optional-call", ~S'var o = { f: function() { return 1; } }; var n = null; print(o.f?.() + "," + n?.f?.() + "," + o.g?.());'},
     {"optional-computed", ~S'var o = { m: function() { return 2; } }; var n = null; var k = "m"; print(o?.[k]() + "," + n?.[k]);'},
     {"optional-long-chain", ~S'var n = null; print(n?.b.c + "," + (n?.b.c === undefined));'},
+    {"optchain-whole-shortcircuit", ~S'var n; print((n?.a.b.c === undefined) + "," + (n?.foo().bar === undefined) + "," + (n?.a || "fb"));'},
+    {"optchain-real-mixed", ~S'var o = {a:{b:{c:42}}}; print(o?.a?.b?.c + "," + o.a?.b.c + "," + (o?.x?.y === undefined));'},
+    # strict null/undefined member access is a TypeError (real object: instanceof + constructor + name).
+    {"null-read-typeerror", ~S'try { var x = null; x.foo; print("NO"); } catch(e) { print((e instanceof TypeError) + ":" + e.name); }'},
+    {"undef-call-typeerror", ~S'try { undefined.foo(); } catch(e) { print((e instanceof Error) + "," + (e.constructor === TypeError)); }'},
+    {"assert-throws-shape", ~S'function t(C, f){ try { f(); return "no"; } catch(x){ return x.constructor === C ? "OK" : "no"; } } print(t(TypeError, function(){ null.x; }));'},
+    # String.prototype.match returns null (not undefined) on no-match.
+    {"match-null-on-miss", ~S'var m = "abc".match(/z+/); print((m === null) + "," + (null === "abc".match(/(x)(y)/)));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
