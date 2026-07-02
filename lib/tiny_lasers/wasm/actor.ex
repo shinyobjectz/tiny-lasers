@@ -528,17 +528,24 @@ defmodule TinyLasers.Wasm.Actor do
           end
 
         # FALLBACK (qjs-run.wasm not yet rebuilt with persistent setup): re-run the whole script per message
-        # via the Sandbox. State does NOT persist on this path (documented limitation until the rebuild).
+        # on the substrate directly (the nexus-only Sandbox wrapper was dropped in extraction). State does
+        # NOT persist on this path (documented limitation until the rebuild). Isolated in a fresh Task so
+        # the guest's run context (:tl_vfs/argv/…) never leaks into the actor process.
         nil ->
           qjs = qjs_run_wasm()
 
           if qjs do
-            TinyLasers.Wasm.Sandbox.run_command(
-              {:interp, qjs, script <> "\n;__beam_dispatch();"},
-              "",
-              fuel: 5_000_000_000,
-              timeout_ms: 30_000
-            )
+            Task.async(fn ->
+              with {:ok, mod} <- TinyLasers.Wasm.decode_cached(qjs) do
+                Process.put(:tl_backend, :map)
+                Process.put(:tl_vfs, %{"main" => script <> "\n;__beam_dispatch();"})
+                Process.put(:tl_argv, ["qjs", "/work/main"])
+                Process.put(:tl_fds, %{})
+                Process.put(:tl_nextfd, 4)
+                TinyLasers.Wasm.call_io(mod, "_start", [], fuel: 5_000_000_000, timeout_ms: 30_000)
+              end
+            end)
+            |> Task.await(31_000)
           end
 
           {Term.normalize(msg), state}

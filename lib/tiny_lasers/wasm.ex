@@ -3097,7 +3097,8 @@ defmodule TinyLasers.Wasm do
       |> Enum.with_index()
       |> Enum.drop(cookie)
       |> Enum.map(fn {{name, type}, idx} ->
-        <<idx + 1::64-little, 0::64-little, byte_size(name)::32-little, type, 0::size(24)>> <> name
+        # d_ino MUST be non-zero: some libc readdir impls treat a 0 inode as a deleted slot and skip it.
+        <<idx + 1::64-little, idx + 1::64-little, byte_size(name)::32-little, type, 0::size(24)>> <> name
       end)
       |> IO.iodata_to_binary()
 

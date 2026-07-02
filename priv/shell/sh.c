@@ -102,13 +102,24 @@ static void grep_recurse(const char *path, struct grep_u *base) {
   if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) { grep_one(path, base); return; }
   DIR *d = opendir(path);
   if (!d) return;
+  /* Collect ALL child names, then closedir BEFORE recursing. The minimal wasi-libc buffers
+   * readdir per DIR, but interleaving two open dir streams (parent still open while a child
+   * opens) corrupts the parent's buffer — so read one level fully, close it, then descend. */
+  int cap = 32, cnt = 0;
+  char **names = malloc(cap * sizeof *names);
   struct dirent *e;
-  while ((e = readdir(d))) {
+  while (names && (e = readdir(d))) {
     if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-    char child[1024]; snprintf(child, sizeof child, "%s/%s", path, e->d_name);
-    grep_recurse(child, base);
+    if (cnt == cap) { cap *= 2; char **g = realloc(names, cap * sizeof *names); if (!g) break; names = g; }
+    names[cnt++] = strdup(e->d_name);
   }
   closedir(d);
+  for (int i = 0; i < cnt; i++) {
+    char child[1024]; snprintf(child, sizeof child, "%s/%s", path, names[i]);
+    grep_recurse(child, base);
+    free(names[i]);
+  }
+  free(names);
 }
 static int b_grep(Ctx *c) {
   int inv = 0, icase = 0, rec = 0, list = 0, ai = 1;
