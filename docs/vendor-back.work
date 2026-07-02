@@ -1,0 +1,105 @@
+# Vendor-back: nexus retires Washy, runs on tiny-lasers
+
+The endgame the [[ROADMAP]] names as step 6, planned in full. tiny-lasers IS the
+Washy runtime — extracted, renamed (`Nexus.Washy → TinyLasers.Wasm`, API
+byte-identical), hardened (WASIX locked for C/C++/Rust/Go on 14 recompiled
+conformance binaries; the sh.c shell proven interp ≡ asm; acorn rung 3.5–5.9×
+faster from asm-lane work; 250+ tests; zero third-party deps). Nexus still runs
+the stale pre-extraction copy. This document is the migration: how nexus deletes
+its 35-module `lib/washy/` and consumes the substrate, without a big bang.
+
+## Why now
+
+The autopoet's voice agent shipped a read-only shell over `Nexus.Shell` and it
+returned empty grep results against real content — the stale copy is now
+user-visible. Every runtime improvement since extraction (f64 asm memory ops,
+fcmp inlining, WASIX conformance) exists only upstream. Two diverging copies of
+a 4,676-line interpreter is the worst possible state; the roadmap always said
+the split was temporary.
+
+## The two load-bearing facts
+
+One: the shell's ENTIRE external contract is one seam. `Nexus.Shell.run(line,
+host_dir, opts) -> {output, ok?}` is all that bash.ex (the agent lane),
+session.ex, cell.ex, and the autopoet's voice tool depend on. Keep that
+signature and no caller changes.
+
+Two: the runtime API is a rename. `decode_cached/1`, `call_io/4`, `host_exec/3`,
+`instance_start/4`, `Metrics.*` — identical signatures, identical docs. The
+work is not porting; it is re-pointing, plus supplying the two things
+tiny-lasers deliberately stubbed: the real Store backend and the host
+capability dispatch (the Membrane).
+
+## The landmine
+
+The upstream `:tl_*` sweep is PARTIAL: module namespaces are renamed, but some
+ETS / process-dict keys are still `:washy_*` (ROADMAP "optional cleanup" #5).
+Side-by-side operation of both runtimes in one BEAM — which is exactly how the
+oracle phase below de-risks the cutover — collides on any shared key. Phase 0
+finishes that sweep upstream FIRST. The seam translation table (process-dict
+contract set by `Nexus.Shell.run_washy/4`: backend, vfs, stdin, argv, fds,
+nextfd, programs, host_dispatch, env, exec_policy, http, sock) must be
+exhaustive; a missed key fails silently, which is precisely the class of bug
+grep-returning-empty already demonstrated.
+
+## Phases (each gated on green suites in BOTH repos; never big-bang)
+
+deploy do
+  phase "0 — preconditions" do
+    step "finish the :tl_* key sweep upstream (ETS + pdict); grep-proof: nothing reads :washy_* in tiny-lasers"
+    step "record baselines: nexus suite green, tiny-lasers suite green, shell corpus timings, acorn rung numbers"
+    step "add {:tiny_lasers, path: \"../tiny-lasers\"} to nexus mix.exs; boot TinyLasers.Application alongside (keys now disjoint — safe)"
+  end
+
+  phase "1 — the shell seam (P0, fixes the live bug)" do
+    step "port Nexus.Shell.run_washy/4 internals to TinyLasers.Wasm (decode_cached, call_io, mem_slots, Metrics) with the pdict contract translated :washy_* → :tl_*"
+    step "ORACLE MODE: a test-only dual-run flag executes the shell corpus on BOTH runtimes and byte-compares — divergence is a finding, not a surprise"
+    step "coreutils conformance rider: grep -r over VFS dirs returning matches, find (present in the uutils multicall? wire or document), relative-path UX; the voice-tool repro (grep -ri business /work/nexus) becomes a regression test"
+    step "gate: shell_test, washy_host_exec, env_policy, session, metrics, tier — green on the tiny-lasers backend; autopoet voice tool answers the business-plan question"
+  end
+
+  phase "2 — runtime consumers" do
+    step "ssr.ex render/0 + program units (Sandbox wrappers re-point), cell.ex sessions, server.ex /metrics/washy endpoint, application.ex supervision (drop Nexus.Washy children; :tiny_lasers app owns its pools)"
+    step "nexus supplies the real backends: TinyLasers.Store adapter over Nexus.Store (tenant SQLite VFS, fails-closed), host_dispatch bridge for the Membrane capabilities"
+    step "JS lane: Porffor compiler stays in nexus; execution re-points to TinyLasers.Wasm (fixtures already proven byte-identical upstream)"
+    step "gate: full nexus suite; runtime unit tests (washy_*.exs ~60 files) retire in favor of the upstream 250+ — integration tests stay in nexus"
+  end
+
+  phase "3 — delete the corpse" do
+    step "rm lib/washy.ex lib/washy/** (35 modules); CI grep-guard: Nexus.Washy appears nowhere"
+    step "config compat: washy-* deploy attrs remain as documented aliases (user-facing .work config never breaks); accessors gain neutral names"
+  end
+
+  phase "4 — canon + prompt sweep" do
+    step "AGENTS.md/CLAUDE.md mapping line: bash → tiny-lasers (Nexus.Shell seam on TinyLasers.Wasm, sh.c); banned phrases untouched"
+    step "nexus-app-model-spec parenthetical (Nexus.Washy) → TinyLasers.Wasm; beam-memory-architecture anchors re-pointed"
+    step "autopoet limb protocol text (limbs.ex): shell truth updated; VoiceTools needs ZERO code change (it rides the seam) — that is the proof the seam held"
+    step "Wasmer/WASIX subprocess lane (wasix_shell?, default off): file separate deletion issue once parity is proven — spec already deprecates it"
+  end
+
+  phase "5 — publish" do
+    step "hex publish tiny_lasers (zero deps, clean story); nexus may keep the path dep in-monorepo — publishing is for the world, not for us"
+    step "contribution flow: runtime fixes land upstream ONLY"
+  end
+end
+
+## Risks, ranked
+
+The pdict/ETS translation table missing a key (silent behavioral drift — the
+oracle phase exists for this). Store backend parity under tenancy (fails-closed
+semantics must match). Double supervision if Phase 0's sweep is skipped.
+Performance is a non-risk in the right direction — upstream is strictly faster;
+nexus defaults to transpile: false today and can adopt tiering after cutover as
+its own decision. The JS/rollup ladder (acorn tokenizer gap, INV-CAPTURE-BOUND)
+is explicitly OUT of scope: same code both sides, no regression possible from
+the move itself.
+
+## What this buys the autopoet
+
+The voice agent's shell, the limbs' bash, eval-in-scratch, SSR — all inherit
+the WASIX-locked substrate (real recompiled Rust/Go/C/C++ programs as limb
+tools), the asm-lane speed, and one maintained runtime. And the local-inference
+tier-3 dream (Elixir orchestrating Gemma on the GPU) gets a sibling: untrusted
+tool code running fast on the BEAM next to EMLX tensors, one supervision tree.
+
+#tags: migration tiny-lasers washy vendor-back plan
