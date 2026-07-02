@@ -1716,7 +1716,9 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   # a method call on null/undefined fails at the PROPERTY read (spec: `Cannot read properties of …`).
-  def method(:undefined, nm, _a), do: type_error("Cannot read properties of undefined (reading '#{key_str(nm)}')")
+  def method(:undefined, nm, _a) do
+    if System.get_env("GAPSOFT"), do: :undefined, else: type_error("Cannot read properties of undefined (reading '#{key_str(nm)}')")
+  end
   def method(:null, nm, _a), do: type_error("Cannot read properties of null (reading '#{key_str(nm)}')")
 
   # calling a method that doesn't resolve is a guest TypeError, NOT a host escape — the receiver was never a
