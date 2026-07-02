@@ -112,7 +112,11 @@ var fs = {
 var util = {
   inspect: function(x){ return String(x); },
   promisify: function(fn){ return function(){ var a = Array.prototype.slice.call(arguments); return new Promise(function(res, rej){ a.push(function(err, v){ if (err) rej(err); else res(v); }); fn.apply(this, a); }); }; },
-  inherits: function(ctor, sup){ ctor.super_ = sup; ctor.prototype = Object.create(sup.prototype); ctor.prototype.constructor = ctor; }
+  inherits: function(ctor, sup){ ctor.super_ = sup; ctor.prototype = Object.create(sup.prototype); ctor.prototype.constructor = ctor; },
+  // deprecate(fn, msg) returns fn (deprecation warnings are cosmetic; postcss/its deps wrap fns with it).
+  deprecate: function(fn, msg){ return fn; },
+  isDeepStrictEqual: function(a, b){ return JSON.stringify(a) === JSON.stringify(b); },
+  types: { isNativeError: function(e){ return e instanceof Error; } }
 };
 
 // ── os ──

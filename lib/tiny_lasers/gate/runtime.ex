@@ -1326,6 +1326,7 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:global, "JSON"}, "stringify", [v | rest]), do: json_stringify(v, rest)
   def method({:global, "JSON"}, "parse", [s | _]) when is_binary(s), do: json_parse(s)
   def method({:global, "Number"}, "isInteger", [x | _]), do: is_number(x) and trunc(x) == x
+  def method({:global, "Number"}, "isSafeInteger", [x | _]), do: is_number(x) and trunc(x) == x and abs(x) <= 9_007_199_254_740_991
   def method({:global, "Number"}, "isNaN", [x | _]), do: to_number(x) == :nan
   def method({:global, "Number"}, "isFinite", [x | _]), do: is_number(x)
   def method({:global, "Number"}, "parseFloat", [x | _]), do: parse_float(x)
@@ -2114,7 +2115,7 @@ defmodule TinyLasers.Gate.Runtime do
         Process.info(self(), :current_stacktrace) |> elem(1) |> Enum.filter(fn {m,_,_,_} -> m |> to_string() =~ ~r/Guest|Runtime/ end) |> Enum.take(6) |> Enum.map_join(" <- ", fn {_,f,a,_} -> "#{f}/#{a}" end)
       else "" end
       akeys = args |> Enum.map(fn a -> if match?({:cell,_}, a), do: okeys(a) |> Enum.take(6), else: a end) |> inspect() |> String.slice(0, 100)
-      IO.puts(:stderr, "GAP construct #{inspect(nc)|>String.slice(0,50)} argkeys=#{akeys} #{st}")
+      IO.puts(:stderr, "GAP construct #{inspect(nc)|>String.slice(0,50)} @#{inspect(Process.get(:gg_pos))} argkeys=#{akeys} #{st}")
     end
     if System.get_env("GAPSOFT"), do: cell_new([]), else: guest_error("not a constructor")
   end
