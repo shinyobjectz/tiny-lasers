@@ -1009,10 +1009,11 @@ defmodule TinyLasers.Gate.Runtime do
 
   def method(s, "charCodeAt", [i | _]) when is_binary(s) do
     idx = trunc(i)
+    # out-of-range charCodeAt is NaN (not undefined) per spec.
     cond do
-      idx < 0 -> :undefined
-      ascii?(s) -> (if idx < byte_size(s), do: :binary.at(s, idx) * 1.0, else: :undefined)
-      true -> (case Enum.at(String.to_charlist(s), idx) do nil -> :undefined; cp -> cp * 1.0 end)
+      idx < 0 -> :nan
+      ascii?(s) -> (if idx < byte_size(s), do: :binary.at(s, idx) * 1.0, else: :nan)
+      true -> (case Enum.at(String.to_charlist(s), idx) do nil -> :nan; cp -> cp * 1.0 end)
     end
   end
 
@@ -1310,9 +1311,9 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:global, "JSON"}, "stringify", [v | rest]), do: json_stringify(v, rest)
   def method({:global, "JSON"}, "parse", [s | _]) when is_binary(s), do: json_parse(s)
   def method({:global, "Number"}, "isInteger", [x | _]), do: is_number(x) and trunc(x) == x
-  def method({:global, "Number"}, "isNaN", [x | _]), do: not is_number(x)
+  def method({:global, "Number"}, "isNaN", [x | _]), do: to_number(x) == :nan
   def method({:global, "Number"}, "isFinite", [x | _]), do: is_number(x)
-  def method({:global, "Number"}, "parseFloat", [x | _]), do: to_number(x)
+  def method({:global, "Number"}, "parseFloat", [x | _]), do: parse_float(x)
   def method({:global, "String"}, "fromCharCode", codes), do: codes |> Enum.map(&<<trunc(&1)::utf8>>) |> Enum.join()
   def method({:global, "String"}, "fromCodePoint", codes), do: codes |> Enum.map(&<<trunc(&1)::utf8>>) |> Enum.join()
   # Symbol.for(key): the GLOBAL symbol registered under `key` — same key ⇒ same symbol (stable id). Preact/React
@@ -1436,11 +1437,56 @@ defmodule TinyLasers.Gate.Runtime do
 
   defp math_static("floor", [x | _]), do: Float.floor(x / 1)
   defp math_static("ceil", [x | _]), do: Float.ceil(x / 1)
-  defp math_static("round", [x | _]), do: Float.round(x / 1) |> trunc() |> Kernel.*(1.0)
+  # JS Math.round is half-toward-+Infinity (`round(-1.5) === -1`), i.e. floor(x + 0.5) — NOT Erlang's
+  # round-half-away-from-zero.
+  defp math_static("round", [x | _]), do: Float.floor(to_number(x) + 0.5)
   defp math_static("trunc", [x | _]), do: trunc(x) * 1.0
   defp math_static("abs", [x | _]), do: abs(x) * 1.0
-  defp math_static("sqrt", [x | _]), do: :math.sqrt(x)
-  defp math_static("pow", [a, b | _]), do: :math.pow(a, b)
+  defp math_static("sqrt", [x | _]), do: smath(&:math.sqrt/1, x)
+  defp math_static("cbrt", [x | _]), do: (n = to_number(x); if n < 0, do: -:math.pow(-n, 1 / 3), else: :math.pow(n, 1 / 3))
+  defp math_static("pow", [a, b | _]), do: js_pow(to_number(a), to_number(b))
+  # trig / log / exp — all JS-safe (a domain error, e.g. log(-1)/acos(2)/sqrt(-1), is NaN in JS, not a crash).
+  defp math_static("sin", [x | _]), do: smath(&:math.sin/1, x)
+  defp math_static("cos", [x | _]), do: smath(&:math.cos/1, x)
+  defp math_static("tan", [x | _]), do: smath(&:math.tan/1, x)
+  defp math_static("asin", [x | _]), do: smath(&:math.asin/1, x)
+  defp math_static("acos", [x | _]), do: smath(&:math.acos/1, x)
+  defp math_static("atan", [x | _]), do: smath(&:math.atan/1, x)
+  defp math_static("atan2", [y, x | _]), do: smath2(&:math.atan2/2, y, x)
+  defp math_static("sinh", [x | _]), do: smath(&:math.sinh/1, x)
+  defp math_static("cosh", [x | _]), do: smath(&:math.cosh/1, x)
+  defp math_static("tanh", [x | _]), do: smath(&:math.tanh/1, x)
+  defp math_static("exp", [x | _]), do: smath(&:math.exp/1, x)
+  defp math_static("expm1", [x | _]), do: smath(fn n -> :math.exp(n) - 1 end, x)
+  defp math_static("log", [x | _]), do: log_safe(&:math.log/1, x)
+  defp math_static("log2", [x | _]), do: log_safe(&:math.log2/1, x)
+  defp math_static("log10", [x | _]), do: log_safe(&:math.log10/1, x)
+  defp math_static("log1p", [x | _]), do: smath(fn n -> :math.log(1 + n) end, x)
+  defp math_static("hypot", args), do: smath(fn _ -> :math.sqrt(args |> Enum.map(&(to_number(&1) ** 2)) |> Enum.sum()) end, 0)
+
+  # run a math fn, mapping an Erlang domain ArithmeticError to JS's NaN.
+  defp smath(f, x) do
+    n = to_number(x)
+    if is_number(n), do: (try do f.(n) rescue ArithmeticError -> :nan end), else: :nan
+  end
+
+  defp smath2(f, a, b) do
+    x = to_number(a)
+    y = to_number(b)
+    if is_number(x) and is_number(y), do: (try do f.(x, y) rescue ArithmeticError -> :nan end), else: :nan
+  end
+
+  # logarithms: log(0) is -Infinity, log(negative) is NaN (JS), not an Erlang crash.
+  defp log_safe(f, x) do
+    n = to_number(x)
+
+    cond do
+      not is_number(n) -> :nan
+      n == 0 -> :neg_infinity
+      n < 0 -> :nan
+      true -> f.(n)
+    end
+  end
   defp math_static("max", args), do: (args |> Enum.filter(&is_number/1) |> Enum.max(fn -> 0.0 end)) * 1.0
   defp math_static("min", args), do: (args |> Enum.filter(&is_number/1) |> Enum.min(fn -> 0.0 end)) * 1.0
   defp math_static("random", _), do: :rand.uniform()
@@ -1448,12 +1494,19 @@ defmodule TinyLasers.Gate.Runtime do
   defp math_static(_, _), do: :undefined
 
   # calling a namespace/coercion function or a global function
-  def call({:global, "String"}, args), do: to_str(List.first(args) || :undefined)
-  def call({:global, "Number"}, args), do: to_number(List.first(args) || :undefined)
-  def call({:global, "Boolean"}, args), do: truthy(List.first(args) || :undefined)
+  # coercion constructors — `Enum.at(args, 0, default)`, NOT `List.first(args) || default`: guest `false`
+  # is Elixir `false`, so `List.first([false]) || :undefined` wrongly yields :undefined (String(false) was
+  # "undefined", Number(false) was NaN). String() = "", Number() = 0, Boolean() = false with no args.
+  def call({:global, "String"}, []), do: ""
+  def call({:global, "String"}, [a | _]), do: to_str(a)
+  def call({:global, "Number"}, []), do: 0.0
+  def call({:global, "Number"}, [a | _]), do: to_number(a)
+  def call({:global, "Boolean"}, []), do: false
+  def call({:global, "Boolean"}, [a | _]), do: truthy(a)
   def call({:global, "Array"}, [n]) when is_number(n), do: avec(List.duplicate(:undefined, trunc(n)))
   def call({:global, "Array"}, args), do: avec(args)
-  def call({:global, "Object"}, args), do: List.first(args) || olit()
+  def call({:global, "Object"}, [a | _]) when a != :undefined and a != :null, do: a
+  def call({:global, "Object"}, _), do: olit()
   def call({:global, err}, args) when err in @error_names, do: construct({:global, err}, args)
   # Symbol(desc): a fresh unique symbol. Represented as {:symbol, id, desc}; identity is the id, so two
   # Symbol("x") differ. Usable as an object key (key_str tags it uniquely).
@@ -1464,8 +1517,8 @@ defmodule TinyLasers.Gate.Runtime do
   def call({:global, _}, _args), do: :undefined
 
   def call({:globalfn, "parseInt"}, [x | _]), do: parse_int(x)
-  def call({:globalfn, "parseFloat"}, [x | _]), do: to_number(x)
-  def call({:globalfn, "isNaN"}, [x | _]), do: not is_number(x)
+  def call({:globalfn, "parseFloat"}, [x | _]), do: parse_float(x)
+  def call({:globalfn, "isNaN"}, [x | _]), do: to_number(x) == :nan
   def call({:globalfn, "isFinite"}, [x | _]), do: is_number(x)
   # BigInt(x) → arbitrary-precision `{:bigint, n}` (integer from a string, or the truncated number/bool).
   def call({:globalfn, "BigInt"}, [x | _]), do: {:bigint, bi_int(x)}
@@ -1506,10 +1559,25 @@ defmodule TinyLasers.Gate.Runtime do
   defp json_to_guest(l) when is_list(l), do: avec(Enum.map(l, &json_to_guest/1))
   defp json_to_guest(m) when is_map(m), do: Enum.reduce(m, olit(), fn {k, v}, acc -> oput(acc, to_string(k), json_to_guest(v)) end)
 
+  # parseInt/parseFloat coerce to STRING first (NOT ToNumber): parseInt(true) is parseInt("true") = NaN, not 1.
   defp parse_int(x) do
     case Integer.parse(String.trim(to_str(x))) do
       {n, _} -> n * 1.0
-      :error -> :undefined
+      :error -> :nan
+    end
+  end
+
+  defp parse_float(x) do
+    t = String.trim(to_str(x))
+
+    cond do
+      String.starts_with?(t, "Infinity") or String.starts_with?(t, "+Infinity") -> :infinity
+      String.starts_with?(t, "-Infinity") -> :neg_infinity
+      true ->
+        case Float.parse(t) do
+          {n, _} -> n
+          :error -> (case Integer.parse(t) do {n, _} -> n * 1.0; :error -> :nan end)
+        end
     end
   end
 
@@ -1520,13 +1588,29 @@ defmodule TinyLasers.Gate.Runtime do
   def to_number(x) when x in [:infinity, :neg_infinity, :nan], do: x
   def to_number(true), do: 1.0
   def to_number(false), do: 0.0
+  def to_number(:null), do: 0.0
+  def to_number(:undefined), do: :nan
   def to_number(s) when is_binary(s) do
-    case Float.parse(String.trim(s)) do
-      {n, ""} -> n
-      _ -> case Integer.parse(String.trim(s)) do {n, ""} -> n * 1.0; _ -> :undefined end
+    t = String.trim(s)
+
+    cond do
+      t == "" -> 0.0
+      # JS accepts 0x/0o/0b integer literals as numbers.
+      String.match?(t, ~r/^0[xX][0-9a-fA-F]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 16) * 1.0
+      String.match?(t, ~r/^0[oO][0-7]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 8) * 1.0
+      String.match?(t, ~r/^0[bB][01]+$/) -> String.to_integer(String.slice(t, 2..-1//1), 2) * 1.0
+      true ->
+        case Float.parse(t) do
+          {n, ""} -> n
+          _ -> case Integer.parse(t) do {n, ""} -> n * 1.0; _ -> :nan end
+        end
     end
   end
-  def to_number(_), do: :undefined
+  # array/object coercion: ToPrimitive → string → number (`Number([]) === 0`, `Number([1]) === 1`,
+  # `Number([1,2])` is NaN, `Number({})` is NaN).
+  def to_number({:arr, _} = a), do: to_number(to_str(a))
+  def to_number({:cell, _} = o), do: to_number(to_primitive(o))
+  def to_number(_), do: :nan
 
   # Function.prototype.apply/call/bind (marked + minified helpers use these heavily).
   def method({:fn, _} = f, "apply", args) do
@@ -2110,7 +2194,12 @@ defmodule TinyLasers.Gate.Runtime do
   def binop(op, a, {:bigint, _} = b), do: bigint_binop(op, a, b)
 
   def binop(:+, a, b) when is_number(a) and is_number(b), do: a + b
-  def binop(:+, a, b), do: to_str(a) <> to_str(b)
+  # JS `+`: concat only if a STRING is involved; an OBJECT/array ToPrimitive's to a string (`[]+1 === "1"`);
+  # otherwise (bool/null/undefined) it's NUMERIC (`true + 1 === 2`, `undefined + 1` is NaN) — was wrongly
+  # string-concatenating (`0 + true` gave "0true").
+  def binop(:+, a, b) when is_binary(a) or is_binary(b), do: to_str(a) <> to_str(b)
+  def binop(:+, a, b) when is_tuple(a) or is_tuple(b), do: to_str(a) <> to_str(b)
+  def binop(:+, a, b), do: arith(a, b, &Kernel.+/2)
   def binop(:-, a, b) when is_number(a) and is_number(b), do: a - b
   def binop(:*, a, b) when is_number(a) and is_number(b), do: a * b
   def binop(:/, a, b) when is_number(a) and is_number(b) and b != 0, do: a / b
@@ -2145,7 +2234,8 @@ defmodule TinyLasers.Gate.Runtime do
   def binop(:>, a, b) when is_number(a) and is_number(b), do: a > b
   def binop(:"<=", a, b) when is_number(a) and is_number(b), do: a <= b
   def binop(:">=", a, b) when is_number(a) and is_number(b), do: a >= b
-  def binop(:rem, a, b) when is_number(a) and is_number(b) and b != 0, do: a - b * Float.floor(a / b)
+  # JS `%` is the TRUNCATED remainder (sign follows the dividend): `-1 % 2 === -1`, not floored `1`.
+  def binop(:rem, a, b) when is_number(a) and is_number(b) and b != 0, do: a - b * trunc(a / b)
   # string relational comparison (lexicographic, JS semantics)
   def binop(:<, a, b) when is_binary(a) and is_binary(b), do: a < b
   def binop(:>, a, b) when is_binary(a) and is_binary(b), do: a > b
@@ -2177,14 +2267,31 @@ defmodule TinyLasers.Gate.Runtime do
   def binop(:bsr, a, b), do: bitop(a, b, fn x, y -> Bitwise.bsr(x, Bitwise.band(y, 31)) end)
   # `a >>> b`: ToUint32(a) shifted right by (b & 31), result UNSIGNED (JS's only unsigned op).
   def binop(:bsru, a, b), do: Bitwise.bsr(Bitwise.band(to_int32(a), 0xFFFFFFFF), Bitwise.band(to_int32(b), 31)) * 1.0
-  def binop(:pow, a, b), do: arith(a, b, fn x, y -> :math.pow(x, y) end)
+  def binop(:pow, a, b), do: arith(a, b, &js_pow/2)
+
+  # JS `**` / Math.pow never throws — Erlang `:math.pow` raises on 0**negative (÷0) and negative**fractional
+  # (domain). Map those to the JS results (Infinity / NaN) instead of crashing the runtime.
+  defp js_pow(x, y) when is_number(x) and is_number(y) do
+    try do
+      :math.pow(x, y)
+    rescue
+      ArithmeticError ->
+        cond do
+          x == 0 and y < 0 -> :infinity
+          x < 0 -> :nan
+          true -> :nan
+        end
+    end
+  end
+
+  defp js_pow(_, _), do: :nan
   # relational comparison with a mismatched/non-number operand (`1 < undefined`) is false in JS (NaN).
   def binop(op, _a, _b) when op in [:<, :>, :"<=", :">="], do: false
   # arithmetic on non-number operands: JS coerces via ToNumber; a non-coercible operand yields NaN
   # (`undefined - 2`, `[] * 3`). marked relies on NaN propagating rather than throwing.
   def binop(:-, a, b), do: arith(a, b, &Kernel.-/2)
   def binop(:*, a, b), do: arith(a, b, &Kernel.*/2)
-  def binop(:rem, a, b), do: arith(a, b, fn x, y -> if y == 0, do: :nan, else: x - y * Float.floor(x / y) end)
+  def binop(:rem, a, b), do: arith(a, b, fn x, y -> if y == 0, do: :nan, else: x - y * trunc(x / y) end)
   def binop(op, a, b) do
     if System.get_env("GAPLOG"), do: IO.puts(:stderr, "GAP binop #{inspect(op)} a=#{inspect(a)|>String.slice(0,30)} b=#{inspect(b)|>String.slice(0,30)}")
     guest_error("bad operands")
@@ -2321,6 +2428,7 @@ defmodule TinyLasers.Gate.Runtime do
   def truthy(+0.0), do: false
   def truthy(""), do: false
   def truthy({:bigint, 0}), do: false
+  def truthy(:nan), do: false
   def truthy(_), do: true
 
   # ── helpers ──

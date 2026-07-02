@@ -54,6 +54,13 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"array-method-as-value", ~S'var slice = [].slice; var out = slice.call([10,20,30,40], 2); print(out.join(",") + "," + [1,2,3].map.call([4,5], function(x){return x*2;}).join(","));'},
     {"symbol-for-method", ~S'var a = Symbol.for("x"); var b = Symbol.for("x"); print((a === b) + "," + (typeof a));'},
     {"then-not-thenable", ~S'var e = new TypeError("z"); var a = [1,2]; var o = {}; print((e.then === undefined) + "," + (a.then === undefined) + "," + (o.then === undefined));'},
+    # fuzzer-surfaced coercion/operator/Math correctness (F2 differential vs node 80%→99.6%).
+    {"coerce-falsy", ~S'print(String(false) + "|" + Number(false) + "|" + Number(null) + "|" + Number(undefined) + "|" + String(0) + "|" + Boolean(0));'},
+    {"plus-numeric-coercion", ~S'print((0 + true) + "," + (1 + false) + "," + (null + 5) + "," + ([1,2,3].reduce(function(s,x){return s+x;},0)) + "," + ("a" + 1) + "," + ([] + 1));'},
+    {"modulo-sign", ~S'print((-1 % 2) + "," + (-5 % 3) + "," + (5 % -3) + "," + (-0.25 % 1));'},
+    {"parse-and-isnan", ~S'print(parseInt("42px") + "," + parseFloat("3.14x") + "," + isNaN(null) + "," + isNaN("5") + "," + isNaN(NaN) + "," + parseInt(true));'},
+    {"math-safe", ~S'print(Math.sqrt(-1) + "," + Math.log(0) + "," + Math.round(-1.5) + "," + Math.round(2.5) + "," + (0 ** -1) + "," + Math.log2(8));'},
+    {"nan-falsy", ~S'print((!NaN) + "," + Boolean(NaN) + "," + (NaN ? "T" : "F"));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
