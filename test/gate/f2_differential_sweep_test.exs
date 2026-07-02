@@ -48,6 +48,12 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     # BigInt coercion: radix-prefix strings + object ToPrimitive (Symbol.toPrimitive → valueOf → toString).
     {"bigint-radix-strings", ~S'print(BigInt("0x1F") + "," + BigInt("0b101") + "," + BigInt("0o17") + "," + BigInt("") + "," + BigInt("  42  "));'},
     {"bigint-toprimitive", ~S'var o = {}; o[Symbol.toPrimitive] = function(){ return 42n; }; print(BigInt(o) + "," + BigInt({ valueOf: function(){ return 5; } }) + "," + BigInt({ toString: function(){ return "7"; } }));'},
+    # Preact-surfaced fixes: nested member-target assignment return value, array methods as first-class values,
+    # Symbol.for as a method, then/catch/finally not truthy on non-thenables (Promise duck-typing).
+    {"chained-member-assign", ~S'var o = {}; var r = (o.b = function(){}).c = o; print((r === o) + "," + (o.b.c === o) + "," + typeof o.b);'},
+    {"array-method-as-value", ~S'var slice = [].slice; var out = slice.call([10,20,30,40], 2); print(out.join(",") + "," + [1,2,3].map.call([4,5], function(x){return x*2;}).join(","));'},
+    {"symbol-for-method", ~S'var a = Symbol.for("x"); var b = Symbol.for("x"); print((a === b) + "," + (typeof a));'},
+    {"then-not-thenable", ~S'var e = new TypeError("z"); var a = [1,2]; var o = {}; print((e.then === undefined) + "," + (a.then === undefined) + "," + (o.then === undefined));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},

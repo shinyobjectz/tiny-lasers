@@ -1185,8 +1185,11 @@ defmodule TinyLasers.Gate.Lower do
       %{"type" => "MemberExpression"} = m ->
         # JS assignment evaluates to the ASSIGNED VALUE. `assign_to` rebuilds the member chain and rebinds the
         # root identifier, so DEEP assignments (w.emStrong.rDelimAst = …) propagate even on immutable nested
-        # objects — marked's grammar building relies on this.
-        v = Macro.var(:__ggav, __MODULE__)
+        # objects — marked's grammar building relies on this. The temp holding the value MUST be UNIQUE: a
+        # nested member-target assignment whose object is itself an assignment — `(o.b = fn).c = o` (preact's
+        # createContext: `(l4.Consumer = fn).contextType = l4`) — lowers to another `expr(Assignment)` inside
+        # assign_to; a shared name lets the inner clobber the outer's return value.
+        v = Macro.var(:"__ggav#{System.unique_integer([:positive])}", __MODULE__)
 
         quote do
           unquote(v) = unquote(rq)
@@ -1197,7 +1200,7 @@ defmodule TinyLasers.Gate.Lower do
       # destructuring ASSIGNMENT (not declaration): `[a, b] = x`, `({a, b} = o)` — minified rollup uses these.
       # Reuse the declaration destructuring machinery; the expression evaluates to the whole RHS value.
       %{"type" => t} = pat when t in ["ArrayPattern", "ObjectPattern"] ->
-        v = Macro.var(:__ggav, __MODULE__)
+        v = Macro.var(:"__ggav#{System.unique_integer([:positive])}", __MODULE__)
         {:__block__, [], [quote(do: unquote(v) = unquote(rq))] ++ destr_targets(pat, v, scope) ++ [v]}
     end
   end

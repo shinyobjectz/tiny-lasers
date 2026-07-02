@@ -33,6 +33,13 @@ defmodule TinyLasers.Gate.Runtime do
   # the built-in error constructors (used by `construct`/`call`/`instanceof`).
   @error_names ~w(Error TypeError RangeError SyntaxError ReferenceError EvalError URIError)
 
+  # Array.prototype methods — read as a first-class VALUE they return a bound-method closure so the uncurry
+  # pattern `[].slice.call(arguments, 2)` works (preact's `h()` collects variadic children this way). Gated to
+  # real methods so `arr.then` / random keys stay undefined (the Promise-duck-typing hazard).
+  @arr_methods ~w(map filter reduce reduceRight forEach slice splice push pop shift unshift concat join
+                  indexOf lastIndexOf includes find findIndex findLast findLastIndex some every sort reverse
+                  flat flatMap fill at copyWithin keys values entries toString toReversed toSorted toSpliced with)
+
   # static methods on a constructor that code commonly reads as a FIRST-CLASS VALUE (`var f = Array.isArray`);
   # gated so `typeof Array.somethingElse` stays "undefined".
   @global_static_methods ~w(isArray from of fromCharCode fromCodePoint raw
@@ -429,6 +436,7 @@ defmodule TinyLasers.Gate.Runtime do
     cond do
       k == "length" -> length(al(a)) * 1.0
       (idx = arr_index(k)) != nil -> Enum.at(al(a), idx, :undefined)
+      is_binary(k) and k in @arr_methods -> closure(fn this, args -> method(this, k, args) end)
       true -> Map.get(ap(a), key_str(k), :undefined)
     end
   end
@@ -489,6 +497,12 @@ defmodule TinyLasers.Gate.Runtime do
 
   def oget({:proto, _}, "toString"), do: {:protom, :tostring}
   def oget({:proto, _}, "hasOwnProperty"), do: {:protom, :hasown}
+  # Promise duck-typing sentinels: no built-in prototype EXCEPT Promise has then/catch/finally. The generic
+  # closure fallback below would return a TRUTHY closure for them on Error/Array/… making every object look
+  # thenable and breaking `if (x.then)` promise detection (preact-render-to-string mis-reads a thrown error as
+  # a suspension). Return undefined — but keep them real on Promise.prototype (preact's hooks scheduler does
+  # `Promise.prototype.then.bind(Promise.resolve())`).
+  def oget({:proto, name}, meth) when meth in ["then", "catch", "finally"] and name != "Promise", do: :undefined
   # any other prototype method (`Array.prototype.slice.call(arguments, 1)`): a closure that dispatches the
   # named method on the receiver, so .call/.apply/.bind ride the normal {:fn} machinery.
   def oget({:proto, _}, meth) when is_binary(meth), do: closure(fn this, args -> method(this, meth, args) end)
@@ -1300,6 +1314,11 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:global, "Number"}, "isFinite", [x | _]), do: is_number(x)
   def method({:global, "Number"}, "parseFloat", [x | _]), do: to_number(x)
   def method({:global, "String"}, "fromCharCode", codes), do: codes |> Enum.map(&<<trunc(&1)::utf8>>) |> Enum.join()
+  def method({:global, "String"}, "fromCodePoint", codes), do: codes |> Enum.map(&<<trunc(&1)::utf8>>) |> Enum.join()
+  # Symbol.for(key): the GLOBAL symbol registered under `key` — same key ⇒ same symbol (stable id). Preact/React
+  # use `Symbol.for('react.element')` etc. as type markers. (Direct-call path; `var f = Symbol.for` uses oget.)
+  def method({:global, "Symbol"}, "for", [k | _]), do: (d = to_str(k); {:symbol, "for:" <> d, d})
+  def method({:global, "Symbol"}, "keyFor", [{:symbol, _, d} | _]), do: d
 
   defp object_static("keys", [o | _]), do: avec(okeys(o))
   defp object_static("values", [o | _]), do: avec(Enum.map(okeys(o), &oget(o, &1)))
