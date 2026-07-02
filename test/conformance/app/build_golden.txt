@@ -1,0 +1,36 @@
+'use strict';
+
+var preact = require('preact');
+
+function Header(props) {
+  return preact.h('header', null, [
+    preact.h('h1', null, props.title),
+    preact.h('nav', null, ['home', 'about', 'contact'].map(function (l) { return preact.h('a', { href: '/' + l }, l); }))
+  ]);
+}
+
+function Card(props) {
+  return preact.h('li', { class: props.featured ? 'card featured' : 'card' }, [
+    preact.h('strong', null, props.title),
+    props.tag ? preact.h('span', { class: 'tag' }, props.tag) : null
+  ]);
+}
+
+function CardList(props) {
+  return preact.h('ul', { class: 'cards' }, props.cards.map(function (c, i) {
+    return preact.h(Card, { key: i, title: c.title, tag: c.tag, featured: i === 0 });
+  }));
+}
+
+function Footer(props) { return preact.h('footer', null, '(c) ' + props.year + ' — built + SSR on F2'); }
+
+function App(props) {
+  return preact.h('div', { id: 'app' }, [
+    preact.h(Header, { title: props.title }),
+    props.intro ? preact.h('p', { class: 'intro' }, props.intro) : null,
+    preact.h(CardList, { cards: props.cards }),
+    preact.h(Footer, { year: props.year })
+  ]);
+}
+
+exports.App = App;

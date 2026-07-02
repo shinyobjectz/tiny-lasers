@@ -128,6 +128,16 @@ var clearImmediate = function(){};
 var setInterval = function(){ return 0; };
 var clearInterval = function(){};
 
+// ── URL (postcss resolves file/source-map paths through it; a functional-enough shim) ──
+function URL(input, base) {
+  var s = String(input);
+  this.href = s; this.protocol = s.indexOf(":") >= 0 ? s.slice(0, s.indexOf(":") + 1) : "file:";
+  this.pathname = s; this.search = ""; this.hash = ""; this.host = ""; this.hostname = ""; this.origin = "null";
+  this.searchParams = { get: function(){ return null; }, has: function(){ return false; }, getAll: function(){ return []; } };
+}
+URL.prototype.toString = function(){ return this.href; };
+function URLSearchParams(){ this.get = function(){ return null; }; this.has = function(){ return false; }; }
+
 // ── os ──
 var os = { platform: function(){ return "linux"; }, EOL: "\n", cpus: function(){ return [{}]; }, tmpdir: function(){ return "/tmp"; } };
 
