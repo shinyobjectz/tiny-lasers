@@ -1223,8 +1223,11 @@ defmodule TinyLasers.Gate.Lower do
       scope[:funcs] && MapSet.member?(scope.funcs, n) ->
         quote(do: unquote(@runtime).greg_set(unquote((scope[:fnmap] || %{})[n] || n), unquote(valq)))
 
+      # an UNDECLARED identifier assignment is a JS implicit GLOBAL (`i = 5` with no var) — write to the global
+      # object so the matching read (ident's global fallback) finds it. A local lvar write here read back as
+      # :undefined (the bug that made every implicit-global loop counter dead).
       true ->
-        quote(do: unquote(lvar(n)) = unquote(valq))
+        quote(do: unquote(@runtime).gset(unquote(n), unquote(valq)))
     end
   end
 
@@ -1374,10 +1377,10 @@ defmodule TinyLasers.Gate.Lower do
     delta = if op == "++", do: 1.0, else: -1.0
     oldv = Macro.var(:__ggupdo, __MODULE__)
 
-    setq =
-      if scope[:boxed] && MapSet.member?(scope.boxed, n),
-        do: quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(@runtime).binop(:+, unquote(oldv), unquote(delta)))),
-        else: quote(do: unquote(lvar(n)) = unquote(@runtime).binop(:+, unquote(oldv), unquote(delta)))
+    # route the write through assign_ident so it lands wherever the name lives — boxed / local / func-registry
+    # / implicit-GLOBAL (a bare `i++` on an undeclared global must hit gset, not a dead lvar → else the loop
+    # counter never advances and the condition, which reads the global, spins forever).
+    setq = assign_ident(n, quote(do: unquote(@runtime).binop(:+, unquote(oldv), unquote(delta))), scope)
 
     if u["prefix"] do
       quote do
@@ -1852,7 +1855,9 @@ defmodule TinyLasers.Gate.Lower do
         quote(do: unquote(@runtime).greg_get(unquote((scope[:fnmap] || %{})[n] || n)))
       # a granted capability compiles to its integer handle — never a host module atom
       is_map(scope[:granted]) and Map.has_key?(scope.granted, n) -> {:{}, [], [:host, scope.granted[n]]}
-      true -> :undefined
+      # an UNDECLARED identifier reads the implicit global (matches assign_ident's global write). Unset → the
+      # global object returns undefined; confinement holds (globalobj is a guest object, never a host ref).
+      true -> quote(do: unquote(@runtime).gget(unquote(n)))
     end
   end
 

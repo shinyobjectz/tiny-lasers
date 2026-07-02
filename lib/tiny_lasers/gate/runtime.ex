@@ -2367,6 +2367,12 @@ defmodule TinyLasers.Gate.Runtime do
   emitted guest module references no external module (keeps the 'only Runtime' confinement invariant literal)."
   def ret(v), do: throw({:gg_return, v})
 
+  @doc "Read/write an UNDECLARED identifier — a JS implicit global (`i = 5` with no `var` targets globalThis).
+  Both go through the guest-owned global object, so reads and writes agree (Lower's fallback formerly wrote a
+  local lvar but read undefined). gset returns the value so `x = (i = 5)` yields 5."
+  def gget(name), do: oget({:globalobj}, name)
+  def gset(name, val), do: (oput({:globalobj}, name, val); val)
+
   @doc "Short-circuit an optional chain (`a?.b.c` with nullish `a`) — thrown from a nullish optional link and
   caught at the ChainExpression boundary, yielding undefined for the WHOLE chain. Routed through the Runtime so
   the emitted guest code never contains a bare `throw` (keeps the 'only Runtime' + pre-compile-audit invariant)."

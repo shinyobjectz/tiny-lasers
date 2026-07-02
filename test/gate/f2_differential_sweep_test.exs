@@ -37,6 +37,10 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"statics-as-values", ~S'var f = Array.isArray; var g = Object.getOwnPropertyDescriptor; print(typeof f + "," + f([1]) + "," + typeof g);'},
     {"uncurry-this", ~S'var j = Function.prototype.call.bind(Array.prototype.join); var h = Function.prototype.call.bind(Object.prototype.hasOwnProperty); print(j([1,2,3]) + "|" + h({a:1}, "a") + "|" + h({a:1}, "b"));'},
     {"error-hierarchy", ~S'var e = new ReferenceError("x"); print((e instanceof ReferenceError) + "," + (e instanceof Error) + "," + e.name + "," + (e.constructor === ReferenceError));'},
+    # implicit globals (undeclared assignment `i = 5` targets globalThis) — read/write/update must agree.
+    {"implicit-global-rw", ~S'i = 5; i = i + 10; print(i);'},
+    {"implicit-global-loop", ~S'var s = ""; for (i = 0; i <= 1; i++) { for (j = 0; j <= i; j++) { s += "" + i + j + "|"; } } print(s);'},
+    {"implicit-global-while", ~S'k = 0; var s = ""; while (k < 3) { s += k; k++; } print(s + "," + k);'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
