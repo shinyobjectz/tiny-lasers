@@ -1649,6 +1649,11 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:protom, :hasown}, "apply", [o, {:arr, _} = av | _]), do: has_own(o, List.first(al(av)))
   def method({:fn, _} = f, "call", [this | rest]), do: invoke(f, this, rest)
   def method({:fn, _} = f, "call", []), do: invoke(f, :undefined, [])
+  # a function's source is NOT retained through lowering — `fn.toString()` returns a canonical placeholder.
+  # (Libraries that embed serialized function SOURCE, e.g. seroval for SSR hydration, get a stand-in; this is a
+  # fundamental limit of compile-to-BEAM. With hydratable:false the placeholder never reaches the output.)
+  def method({:fn, _}, "toString", _), do: "function () { }"
+  def method({:host, _}, "toString", _), do: "function () { [native code] }"
 
   def method({:fn, _} = f, "bind", [this | bound]) do
     closure(fn _ignored_this, args -> invoke(f, this, bound ++ args) end)

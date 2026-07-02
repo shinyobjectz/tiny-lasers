@@ -119,6 +119,15 @@ var util = {
   types: { isNativeError: function(e){ return e instanceof Error; } }
 };
 
+// ── timers: defer callbacks to a microtask so they run AFTER the current sync code (Solid SSR schedules
+// reactive-root disposal via `setTimeout(dispose)` — it must not run during render). Intervals are no-ops. ──
+var setTimeout = function(fn){ if (typeof fn === "function") Promise.resolve().then(function(){ fn(); }); return 0; };
+var setImmediate = setTimeout;
+var clearTimeout = function(){};
+var clearImmediate = function(){};
+var setInterval = function(){ return 0; };
+var clearInterval = function(){};
+
 // ── os ──
 var os = { platform: function(){ return "linux"; }, EOL: "\n", cpus: function(){ return [{}]; }, tmpdir: function(){ return "/tmp"; } };
 
