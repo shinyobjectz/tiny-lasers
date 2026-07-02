@@ -859,12 +859,32 @@ defmodule TinyLasers.Gate.Runtime do
         list -> avec(list)
       end
     else
-      case Regex.run(re, s) do
+      # a non-global match result carries `.index` (match position) and `.input` (the subject) — like exec.
+      case Regex.run(re, s, return: :index) do
         # spec: String.prototype.match returns `null` on no-match (NOT undefined) — `x.match(re) === null`
         # guards are load-bearing (marked's fences: `null === (u = t.match(re)) ? n : u[1]`).
-        nil -> :null
-        caps -> avec(Enum.map(caps, fn c -> c || :undefined end))
+        nil ->
+          :null
+
+        [{ms, _} | _] = idxs ->
+          caps = Enum.map(idxs, fn {i, l} -> if i < 0, do: :undefined, else: binary_part(s, i, l) end)
+          avec(caps, match_props(re, s, ms))
       end
+    end
+  end
+
+  # `.index` / `.input`, plus `.groups` (an object of named captures) when the pattern has `(?<name>…)`; else
+  # `.groups` is absent → undefined, per spec.
+  defp match_props(re, s, ms) do
+    base = %{"index" => ms * 1.0, "input" => s}
+
+    case Regex.names(re) do
+      [] ->
+        base
+
+      names ->
+        nc = Regex.named_captures(re, s) || %{}
+        Map.put(base, "groups", cell_new(Enum.map(names, fn n -> {n, Map.get(nc, n) || :undefined} end)))
     end
   end
 
@@ -903,7 +923,7 @@ defmodule TinyLasers.Gate.Runtime do
       [{ms, ml} | _] = idxs ->
         caps = Enum.map(idxs, fn {i, l} -> if i < 0, do: :undefined, else: binary_part(str, i, l) end)
         if global, do: relast_set(r, ms + ml)
-        avec(caps, %{"index" => ms * 1.0, "input" => str})
+        avec(caps, match_props(re, str, ms))
 
       _ ->
         (if global, do: relast_set(r, 0)); :null

@@ -41,6 +41,10 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"implicit-global-rw", ~S'i = 5; i = i + 10; print(i);'},
     {"implicit-global-loop", ~S'var s = ""; for (i = 0; i <= 1; i++) { for (j = 0; j <= i; j++) { s += "" + i + j + "|"; } } print(s);'},
     {"implicit-global-while", ~S'k = 0; var s = ""; while (k < 3) { s += k; k++; } print(s + "," + k);'},
+    # RegExp match result carries .index/.input; named capture groups populate .groups.
+    {"match-index-input", ~S'var m = "12-34".match(/(\d+)-(\d+)/); print(m[0] + "|" + m[1] + "|" + m[2] + "|" + m.index + "|" + m.input);'},
+    {"match-named-groups", ~S'var m = "2024-06".match(/(?<y>\d{4})-(?<mo>\d{2})/); print(m.groups.y + "|" + m.groups.mo + "|" + (m.groups.missing === undefined));'},
+    {"exec-index-groups", ~S'var re = /(?<a>\w)(\d)/; var m = re.exec("x5"); print(m[0] + "," + m[1] + "," + m[2] + "," + m.index + "," + m.groups.a);'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
