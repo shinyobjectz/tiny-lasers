@@ -784,14 +784,27 @@ defmodule TinyLasers.Gate.Runtime do
   # guest-safe term `{:regex, compiled, source, flags}`; the guest can only pass it to the regex methods. ──
   @doc "Compile a guest regex. JS flags i/m/s/u/x map to Elixir opts; g is applied at match/replace time."
   def regex(source, flags) when is_binary(source) do
-    opts = flags |> String.graphemes() |> Enum.filter(&(&1 in ~w(i m s u x))) |> Enum.join()
+    base = flags |> String.graphemes() |> Enum.filter(&(&1 in ~w(i m s u x))) |> Enum.join()
 
     # keep `source` (the JS-visible .source) as-is, but translate JS-only regex syntax before PCRE compile.
-    case Regex.compile(js_re_to_pcre(source), opts) do
+    pcre = js_re_to_pcre(source) |> rx_neutralize_surrogates()
+
+    # `\x{…}` code-point escapes (from `\uXXXX` / large unicode ranges) require PCRE unicode mode; guest strings
+    # are UTF-8. Without it, `\x{02C1}` fails "code point too large" — which silently broke terser's giant
+    # UNICODE.ID_Start identifier regex → NO identifier tokenized.
+    opts = if String.contains?(pcre, "\\x{") and not String.contains?(base, "u"), do: base <> "u", else: base
+
+    case Regex.compile(pcre, opts) do
       {:ok, re} -> {:regex, re, source, flags}
       {:error, _} -> {:regex, ~r/(?!)/, source, flags}
     end
   end
+
+  # PCRE rejects surrogate code points (0xD800–0xDFFF), which JS identifier regexes use in `\uD800-\uDBFF` ranges
+  # / surrogate-pair sequences for astral chars. F2 strings are UTF-8 (astral = real code points, never
+  # surrogates), so those constructs never match real text — replace each surrogate escape with U+FFFD so the
+  # regex COMPILES and its BMP/ASCII part still matches. (Astral identifiers won't tokenize; acceptable.)
+  defp rx_neutralize_surrogates(pcre), do: String.replace(pcre, ~r/\\x\{[Dd][89A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]\}/, "\\x{FFFD}")
 
   # JS-only regex syntax → PCRE before compile:
   #  * `[^]` ("any char incl. newline") is an empty/invalid class in PCRE — rewrite to `[\s\S]`.

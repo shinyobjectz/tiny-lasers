@@ -68,6 +68,9 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"unicode-str", ~S'print("café".at(-1) + "|" + "café".padStart(8, "*") + "|" + "café".length);'},
     {"json-edge", ~S'print(JSON.stringify(NaN) + "|" + JSON.stringify(Infinity) + "|" + String(JSON.stringify(undefined)) + "|" + JSON.stringify([1, undefined, NaN]));'},
     {"loose-eq-object", ~S'print(([] == 0) + "," + ([1] == 1) + "," + ("" == 0) + "," + (null == undefined));'},
+    # unicode regex: code-point escapes (\uXXXX) + large ranges + surrogate ranges must compile (terser's giant
+    # UNICODE.ID_Start identifier regex failed → no identifier tokenized).
+    {"unicode-regex", ~S'var re = /[$A-Z_a-z\xAAˁͰ-ʹ]|\uD800[\uDC00-\uDFFF]/; print(re.test("v") + "," + re.test("A") + "," + re.test("ͱ") + "," + re.test("1"));'},
     {"logical-assign-and", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a &&= v(); var b = 1; b &&= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-or", ~S'var calls = 0; function v() { calls++; return 9; } var a = 0; a ||= v(); var b = 1; b ||= v(); print(a + "," + b + "," + calls);'},
     {"logical-assign-nullish", ~S'var calls = 0; function v() { calls++; return 9; } var a; a ??= v(); var b = 0; b ??= v(); print(a + "," + b + "," + calls);'},
