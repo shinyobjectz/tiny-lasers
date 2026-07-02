@@ -94,6 +94,10 @@ var path = {
   }
 };
 path.posix = path;
+// win32 surface: rollup builds `new RegExp('\\' + path.win32.sep)` at init to normalize backslashes. On our
+// posix "/" filenames this is a no-op, but the property must exist (real node has it; F2 only limped past its
+// absence via lenient undefined-member reads — a strict engine/oracle throws).
+path.win32 = { sep: "\\", delimiter: ";" };
 var pathWin = path; // rollup only uses posix on this platform
 
 // ── minimal in-memory fs (virtual; rollup's bundle path uses plugin load, not real fs) ──

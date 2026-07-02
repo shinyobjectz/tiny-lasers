@@ -1783,7 +1783,16 @@ defmodule TinyLasers.Gate.Lower do
         _ -> []
       end
 
-    target ++ assigned_names(n["right"])
+    # a member TARGET's computed index (and object chain) can itself mutate vars — `a[index++] = v` mutates
+    # `index`, not just `a`. The specialized clause replaces the generic full-recursion, so recurse the LHS
+    # explicitly or the nested update is invisible to loop-state threading (index stays stuck each iteration).
+    left_side =
+      case l do
+        %{"type" => "MemberExpression"} -> assigned_names(l["property"]) ++ assigned_names(l["object"])
+        _ -> []
+      end
+
+    target ++ left_side ++ assigned_names(n["right"])
   end
 
   defp assigned_names(%{"type" => "UpdateExpression", "argument" => %{"type" => "Identifier", "name" => name}}),

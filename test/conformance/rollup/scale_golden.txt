@@ -1,0 +1,518 @@
+SCALE_CHUNK[common.js]{const BASE = "shared-";
+function shout(s) { return BASE + s.toUpperCase(); }
+function whisper(s) { return BASE + s.toLowerCase(); }
+
+export { shout as s, whisper as w };
+}
+===CHUNKSEP===
+SCALE_CHUNK[e0.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG0 = "u0";
+function local0(x) { return TAG0 + ":" + x; }
+
+console.log(shout(local0(TAG0)) + whisper("0"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e1.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG1 = "u1";
+function local1(x) { return TAG1 + ":" + x; }
+
+console.log(shout(local1(TAG1)) + whisper("1"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e10.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG10 = "u10";
+function local10(x) { return TAG10 + ":" + x; }
+
+console.log(shout(local10(TAG10)) + whisper("10"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e11.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG11 = "u11";
+function local11(x) { return TAG11 + ":" + x; }
+
+console.log(shout(local11(TAG11)) + whisper("11"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e12.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG12 = "u12";
+function local12(x) { return TAG12 + ":" + x; }
+
+console.log(shout(local12(TAG12)) + whisper("12"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e13.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG13 = "u13";
+function local13(x) { return TAG13 + ":" + x; }
+
+console.log(shout(local13(TAG13)) + whisper("13"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e14.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG14 = "u14";
+function local14(x) { return TAG14 + ":" + x; }
+
+console.log(shout(local14(TAG14)) + whisper("14"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e15.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG15 = "u15";
+function local15(x) { return TAG15 + ":" + x; }
+
+console.log(shout(local15(TAG15)) + whisper("15"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e16.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG16 = "u16";
+function local16(x) { return TAG16 + ":" + x; }
+
+console.log(shout(local16(TAG16)) + whisper("16"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e17.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG17 = "u17";
+function local17(x) { return TAG17 + ":" + x; }
+
+console.log(shout(local17(TAG17)) + whisper("17"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e18.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG18 = "u18";
+function local18(x) { return TAG18 + ":" + x; }
+
+console.log(shout(local18(TAG18)) + whisper("18"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e19.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG19 = "u19";
+function local19(x) { return TAG19 + ":" + x; }
+
+console.log(shout(local19(TAG19)) + whisper("19"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e2.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG2 = "u2";
+function local2(x) { return TAG2 + ":" + x; }
+
+console.log(shout(local2(TAG2)) + whisper("2"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e20.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG20 = "u20";
+function local20(x) { return TAG20 + ":" + x; }
+
+console.log(shout(local20(TAG20)) + whisper("20"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e21.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG21 = "u21";
+function local21(x) { return TAG21 + ":" + x; }
+
+console.log(shout(local21(TAG21)) + whisper("21"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e22.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG22 = "u22";
+function local22(x) { return TAG22 + ":" + x; }
+
+console.log(shout(local22(TAG22)) + whisper("22"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e23.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG23 = "u23";
+function local23(x) { return TAG23 + ":" + x; }
+
+console.log(shout(local23(TAG23)) + whisper("23"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e24.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG24 = "u24";
+function local24(x) { return TAG24 + ":" + x; }
+
+console.log(shout(local24(TAG24)) + whisper("24"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e25.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG25 = "u25";
+function local25(x) { return TAG25 + ":" + x; }
+
+console.log(shout(local25(TAG25)) + whisper("25"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e26.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG26 = "u26";
+function local26(x) { return TAG26 + ":" + x; }
+
+console.log(shout(local26(TAG26)) + whisper("26"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e27.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG27 = "u27";
+function local27(x) { return TAG27 + ":" + x; }
+
+console.log(shout(local27(TAG27)) + whisper("27"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e28.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG28 = "u28";
+function local28(x) { return TAG28 + ":" + x; }
+
+console.log(shout(local28(TAG28)) + whisper("28"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e29.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG29 = "u29";
+function local29(x) { return TAG29 + ":" + x; }
+
+console.log(shout(local29(TAG29)) + whisper("29"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e3.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG3 = "u3";
+function local3(x) { return TAG3 + ":" + x; }
+
+console.log(shout(local3(TAG3)) + whisper("3"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e30.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG30 = "u30";
+function local30(x) { return TAG30 + ":" + x; }
+
+console.log(shout(local30(TAG30)) + whisper("30"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e31.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG31 = "u31";
+function local31(x) { return TAG31 + ":" + x; }
+
+console.log(shout(local31(TAG31)) + whisper("31"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e32.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG32 = "u32";
+function local32(x) { return TAG32 + ":" + x; }
+
+console.log(shout(local32(TAG32)) + whisper("32"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e33.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG33 = "u33";
+function local33(x) { return TAG33 + ":" + x; }
+
+console.log(shout(local33(TAG33)) + whisper("33"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e34.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG34 = "u34";
+function local34(x) { return TAG34 + ":" + x; }
+
+console.log(shout(local34(TAG34)) + whisper("34"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e35.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG35 = "u35";
+function local35(x) { return TAG35 + ":" + x; }
+
+console.log(shout(local35(TAG35)) + whisper("35"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e36.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG36 = "u36";
+function local36(x) { return TAG36 + ":" + x; }
+
+console.log(shout(local36(TAG36)) + whisper("36"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e37.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG37 = "u37";
+function local37(x) { return TAG37 + ":" + x; }
+
+console.log(shout(local37(TAG37)) + whisper("37"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e38.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG38 = "u38";
+function local38(x) { return TAG38 + ":" + x; }
+
+console.log(shout(local38(TAG38)) + whisper("38"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e39.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG39 = "u39";
+function local39(x) { return TAG39 + ":" + x; }
+
+console.log(shout(local39(TAG39)) + whisper("39"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e4.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG4 = "u4";
+function local4(x) { return TAG4 + ":" + x; }
+
+console.log(shout(local4(TAG4)) + whisper("4"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e40.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG40 = "u40";
+function local40(x) { return TAG40 + ":" + x; }
+
+console.log(shout(local40(TAG40)) + whisper("40"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e41.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG41 = "u41";
+function local41(x) { return TAG41 + ":" + x; }
+
+console.log(shout(local41(TAG41)) + whisper("41"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e42.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG42 = "u42";
+function local42(x) { return TAG42 + ":" + x; }
+
+console.log(shout(local42(TAG42)) + whisper("42"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e43.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG43 = "u43";
+function local43(x) { return TAG43 + ":" + x; }
+
+console.log(shout(local43(TAG43)) + whisper("43"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e44.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG44 = "u44";
+function local44(x) { return TAG44 + ":" + x; }
+
+console.log(shout(local44(TAG44)) + whisper("44"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e45.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG45 = "u45";
+function local45(x) { return TAG45 + ":" + x; }
+
+console.log(shout(local45(TAG45)) + whisper("45"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e46.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG46 = "u46";
+function local46(x) { return TAG46 + ":" + x; }
+
+console.log(shout(local46(TAG46)) + whisper("46"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e47.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG47 = "u47";
+function local47(x) { return TAG47 + ":" + x; }
+
+console.log(shout(local47(TAG47)) + whisper("47"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e48.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG48 = "u48";
+function local48(x) { return TAG48 + ":" + x; }
+
+console.log(shout(local48(TAG48)) + whisper("48"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e49.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG49 = "u49";
+function local49(x) { return TAG49 + ":" + x; }
+
+console.log(shout(local49(TAG49)) + whisper("49"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e5.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG5 = "u5";
+function local5(x) { return TAG5 + ":" + x; }
+
+console.log(shout(local5(TAG5)) + whisper("5"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e50.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG50 = "u50";
+function local50(x) { return TAG50 + ":" + x; }
+
+console.log(shout(local50(TAG50)) + whisper("50"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e51.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG51 = "u51";
+function local51(x) { return TAG51 + ":" + x; }
+
+console.log(shout(local51(TAG51)) + whisper("51"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e52.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG52 = "u52";
+function local52(x) { return TAG52 + ":" + x; }
+
+console.log(shout(local52(TAG52)) + whisper("52"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e53.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG53 = "u53";
+function local53(x) { return TAG53 + ":" + x; }
+
+console.log(shout(local53(TAG53)) + whisper("53"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e54.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG54 = "u54";
+function local54(x) { return TAG54 + ":" + x; }
+
+console.log(shout(local54(TAG54)) + whisper("54"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e55.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG55 = "u55";
+function local55(x) { return TAG55 + ":" + x; }
+
+console.log(shout(local55(TAG55)) + whisper("55"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e56.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG56 = "u56";
+function local56(x) { return TAG56 + ":" + x; }
+
+console.log(shout(local56(TAG56)) + whisper("56"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e57.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG57 = "u57";
+function local57(x) { return TAG57 + ":" + x; }
+
+console.log(shout(local57(TAG57)) + whisper("57"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e58.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG58 = "u58";
+function local58(x) { return TAG58 + ":" + x; }
+
+console.log(shout(local58(TAG58)) + whisper("58"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e59.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG59 = "u59";
+function local59(x) { return TAG59 + ":" + x; }
+
+console.log(shout(local59(TAG59)) + whisper("59"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e6.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG6 = "u6";
+function local6(x) { return TAG6 + ":" + x; }
+
+console.log(shout(local6(TAG6)) + whisper("6"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e60.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG60 = "u60";
+function local60(x) { return TAG60 + ":" + x; }
+
+console.log(shout(local60(TAG60)) + whisper("60"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e61.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG61 = "u61";
+function local61(x) { return TAG61 + ":" + x; }
+
+console.log(shout(local61(TAG61)) + whisper("61"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e62.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG62 = "u62";
+function local62(x) { return TAG62 + ":" + x; }
+
+console.log(shout(local62(TAG62)) + whisper("62"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e63.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG63 = "u63";
+function local63(x) { return TAG63 + ":" + x; }
+
+console.log(shout(local63(TAG63)) + whisper("63"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e7.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG7 = "u7";
+function local7(x) { return TAG7 + ":" + x; }
+
+console.log(shout(local7(TAG7)) + whisper("7"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e8.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG8 = "u8";
+function local8(x) { return TAG8 + ":" + x; }
+
+console.log(shout(local8(TAG8)) + whisper("8"));
+}
+===CHUNKSEP===
+SCALE_CHUNK[e9.js]{import { s as shout, w as whisper } from './common.js';
+
+const TAG9 = "u9";
+function local9(x) { return TAG9 + ":" + x; }
+
+console.log(shout(local9(TAG9)) + whisper("9"));
+}

@@ -156,7 +156,16 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"bigint-string-coerce", ~S'print(String(42n) + "|" + (255n).toString(16) + "|" + ("x" + 3n));'},
     {"bigint-huge-from", ~S'print(BigInt("123456789012345678901234567890") + "," + typeof BigInt(5.9));'},
     {"bigint-compare-unary", ~S'print((5n < 10n) + "," + (5n === 5n) + "," + (5n === 5) + "," + (5n == 5) + "," + (0n ? "T" : "F") + "," + (-5n) + "," + (~5n));'},
-    {"bigint-array-mask", ~S'var arr = new Array(3).fill(0n); arr[0] |= 1n; arr[1] |= (1n << 40n); arr[2] |= (1n << 55n); print(arr[0] + "," + arr[1] + "," + arr[2]);'}
+    {"bigint-array-mask", ~S'var arr = new Array(3).fill(0n); arr[0] |= 1n; arr[1] |= (1n << 40n); arr[2] |= (1n << 55n); print(arr[0] + "," + arr[1] + "," + arr[2]);'},
+
+    # member-index mutation threaded through loops: `a[index++] = v` mutates `index`, not just `a`. The
+    # compiled lane formerly missed the nested update in loop-state analysis (index stuck at 0 → every write
+    # hit slot 0). This is rollup's generateChunks shape (`chunks[index++] = new Chunk(...)`), only reachable
+    # at ES-code-splitting scale.
+    {"member-idxpp-for", ~S'var items = ["a","b","c"]; var out = new Array(items.length); var index = 0; for (var i = 0; i < items.length; i++) { out[index++] = items[i].toUpperCase(); } var r = []; for (const c of out) r.push(c); print(r.join(","));'},
+    {"member-idxpp-forof", ~S'var a = new Array(3); var index = 0; for (const x of [1,2,3]) { a[index++] = x; } print(a.join(",") + "|" + index);'},
+    {"member-idxpp-while", ~S'var a = new Array(3); var index = 0; var i = 0; while (i < 3) { a[index++] = i; i++; } print(a.join(",") + "|" + index);'},
+    {"member-idxpp-forof-destructure", ~S'var src = [{v:"a"},{v:"b"},{v:"c"}]; var chunks = new Array(src.length); var index = 0; for (const { v } of src) { chunks[index++] = v.toUpperCase(); } print(chunks.join(","));'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do
