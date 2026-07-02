@@ -124,7 +124,13 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
     {"flatMap", ~S'print([1, 2, 3].flatMap(function(x) { return [x, x * 10]; }).join(","));'},
     {"startsWith-pos", ~S'var s = "        each"; print(s.startsWith("each", 8) + "," + s.startsWith("each", 0));'},
     {"matchAll", ~S'var out = []; for (var m of "a1b2c3".matchAll(/([a-z])(\d)/g)) out.push(m[1] + m[2]); print(out.join(","));'},
-    {"div-by-zero", ~S'print((1 / 0) + "," + (-1 / 0) + "," + (0 / 0) + "," + (6 / 2));'}
+    {"div-by-zero", ~S'print((1 / 0) + "," + (-1 / 0) + "," + (0 / 0) + "," + (6 / 2));'},
+
+    # svelte-driven: descriptor merge, Object.hasOwn, function-name self-reassign, non-enumerable for-in.
+    {"getOwnPropertyDescriptors-merge", ~S'function merge(a, b) { var o = {}, d = Object.getOwnPropertyDescriptors(a); for (var k in d) Object.defineProperty(o, k, d[k]); for (var k2 in b) o[k2] = b[k2]; return o; } var n = merge({ type: "F", id: "x", body: 1 }, { id: "y" }); print(n.type + "," + n.id + "," + n.body);'},
+    {"object-hasOwn", ~S'var t = { count: 1 }; var i = Object.hasOwn(t, "count") ? t.count : null; var j = Object.hasOwn(t, "nope") ? 1 : null; print(i + "," + j);'},
+    {"typeof-lazy-init", ~S'function _t(o) { return _t = "function" == typeof Symbol ? function(o) { return typeof o; } : function(o) { return typeof o; }, _t(o); } print(_t(5) + "," + _t("s") + "," + _t({}));'},
+    {"builder-aliased-fields", ~S'class B { nodes = []; #h = this.nodes; push(n) { this.#h.push(n); } html() { return this.nodes.join(""); } } var s = { t: new B() }; var s2 = { ...s }; s2.t.push("<h1>"); s2.t.push("x"); print(s.t.html());'}
   ]
 
   test "every construct case prints identically through Walk and Lower" do

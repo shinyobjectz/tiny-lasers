@@ -356,8 +356,8 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:global, "Number"}, "MIN_VALUE"), do: 5.0e-324
   def oget({:global, "Number"}, "MAX_SAFE_INTEGER"), do: 9_007_199_254_740_991.0
   # the Object static methods callable as first-class values (esbuild aliases `var f = Object.defineProperty`).
-  @obj_statics ~w(keys values entries getOwnPropertyNames getOwnPropertyDescriptor assign create freeze
-                  defineProperty defineProperties getPrototypeOf setPrototypeOf fromEntries)
+  @obj_statics ~w(keys values entries getOwnPropertyNames getOwnPropertyDescriptor getOwnPropertyDescriptors
+                  assign create freeze defineProperty defineProperties getPrototypeOf setPrototypeOf fromEntries hasOwn)
 
   # well-known symbols: stable, shared identities (Symbol.iterator etc. must compare equal across reads).
   def oget({:global, "Symbol"}, k) when k in ["iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag"],
@@ -1215,6 +1215,16 @@ defmodule TinyLasers.Gate.Runtime do
       do: cell_new([{"value", oget(o, ks)}, {"writable", true}, {"enumerable", true}, {"configurable", true}]),
       else: :undefined
   end
+  # getOwnPropertyDescriptors: { key => descriptor } for every own key — svelte's AST-node merge copies a
+  # node's whole shape with this (`for (k in getOwnPropertyDescriptors(node)) defineProperty(clone, k, desc)`);
+  # missing it silently dropped every field but the patched one, reducing FunctionDeclaration to just {id}.
+  defp object_static("getOwnPropertyDescriptors", [o | _]) do
+    cell_new(Enum.map(okeys(o), fn k -> {to_str(k), object_static("getOwnPropertyDescriptor", [o, k])} end))
+  end
+  # Object.hasOwn(o, k) — svelte gates EVERY reactive read/assign transform on
+  # `Object.hasOwn(state.transform, name) ? … : null`; returning undefined made the ternary pick null, so no
+  # `$state`/`$props` use-site was ever rewritten (`count` stayed raw instead of `$.get(count)`).
+  defp object_static("hasOwn", [o, k | _]), do: has_own(o, k)
   defp object_static("fromEntries", [o | _]) do
     pairs = for e <- okeys(o) |> Enum.map(&oget(o, &1)) || [], do: {to_str(oget(e, 0.0)), oget(e, 1.0)}
     cell_new(pairs)
@@ -1659,7 +1669,9 @@ defmodule TinyLasers.Gate.Runtime do
   # declared after it). Functions are few and per-run, so a small process-dict table is fine (the GC concern
   # was OBJECTS, not functions). A guest can only reach these by NAME resolved at compile time to greg_get.
   @doc "Register a top-level guest function by name."
-  def greg_set(name, closure), do: Process.put({:gg_fn, name}, closure)
+  # returns the stored value (not Process.put's OLD value) so `x = (f = impl)` and assignment-as-expression
+  # evaluate to the RHS.
+  def greg_set(name, closure), do: (Process.put({:gg_fn, name}, closure); closure)
 
   @doc """
   Chunk-function dispatch for the exploded/parallel compile: sibling guest modules register their chunk
@@ -2121,6 +2133,43 @@ defmodule TinyLasers.Gate.Runtime do
   @doc "Loop break/continue — routed through the Runtime so the guest references no :erlang.throw (confinement)."
   def brk(tag), do: throw({:gg_break, tag})
   def cont(tag), do: throw({:gg_continue, tag})
+
+  # GGFUEL=1: per-loop iteration counter that aborts a runaway loop, naming its source byte — pinpoints a
+  # loop that terminates in Walk but spins in the compiled lane (loop var not threaded/boxed). No-op unless set.
+  def loop_tick(pos) do
+    n = Process.get({:gg_fuel, pos}, 0) + 1
+    Process.put({:gg_fuel, pos}, n)
+    cap = Process.get(:gg_fuel_cap, 5_000_000)
+    if n > cap, do: throw({:gg_guest_error, "loop fuel exhausted @ byte #{pos} (#{n} iters)"})
+    :ok
+  end
+
+  @doc "GGFUEL: global guest-call counter — catches runaway RECURSION (a function that self-calls forever
+  in the compiled lane but terminates in Walk). Aborts past the cap. No-op unless armed."
+  def call_tick do
+    n = Process.get(:gg_calls, 0) + 1
+    Process.put(:gg_calls, n)
+    cap = Process.get(:gg_call_cap, 50_000_000)
+
+    if n > cap do
+      top =
+        Process.get(:gg_fnhits, %{})
+        |> Enum.sort_by(fn {_, c} -> -c end)
+        |> Enum.take(12)
+        |> Enum.map(fn {pos, c} -> "byte #{pos}: #{c}" end)
+
+      IO.puts(:stderr, "CALLFUEL hottest functions:\n  " <> Enum.join(top, "\n  "))
+      throw({:gg_guest_error, "call fuel exhausted (#{n} calls)"})
+    end
+
+    :ok
+  end
+
+  @doc "GGFUEL: per-function-source-position call tally (armed by :gg_fuel_on) — names the runaway function."
+  def fn_tick(pos) do
+    Process.put(:gg_fnhits, Map.update(Process.get(:gg_fnhits, %{}), pos, 1, &(&1 + 1)))
+    :ok
+  end
 
   @doc "Guest `throw e` — a catchable guest exception carrying the guest value."
   def throw_val(v), do: throw({:gg_throw, v})

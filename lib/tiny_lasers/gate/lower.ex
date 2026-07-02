@@ -92,7 +92,8 @@ defmodule TinyLasers.Gate.Lower do
     chunk_size = Keyword.get(opts, :chunk_size, 25)
     nmods = max(Keyword.get(opts, :modules, 1), 1)
     # arm the sibling-def accumulator: func/6 explodes oversized bodies only when this is set.
-    Process.put(:gg_lower_defs, [])
+    # opts[:explode] == false disables body explosion (diagnostic / small inputs).
+    if Keyword.get(opts, :explode, true), do: Process.put(:gg_lower_defs, []), else: Process.delete(:gg_lower_defs)
     vars = collect_vars(body) |> Enum.uniq()
     boxed = MapSet.new(vars)
     scope0 = %{locals: MapSet.new(vars), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}}
@@ -245,6 +246,14 @@ defmodule TinyLasers.Gate.Lower do
 
   defp hoist(_, s), do: s
 
+  # GGFUEL=1 (read at lower time): emit a per-loop iteration counter that aborts a runaway loop naming its
+  # source byte — pinpoints a loop that terminates in Walk but spins compiled. Emits nothing unless set.
+  defp fuel(node) do
+    if System.get_env("GGFUEL") && is_integer(node["start"]),
+      do: [quote(do: unquote(@runtime).loop_tick(unquote(node["start"])))],
+      else: []
+  end
+
   # ── statements ──
   defp stmt(%{"type" => "VariableDeclaration", "declarations" => ds}, scope) do
     {rev, sc} =
@@ -348,6 +357,8 @@ defmodule TinyLasers.Gate.Lower do
 
           unquote(loop) = fn me ->
             if unquote(@runtime).truthy(unquote(testq)) do
+              unquote_splicing(fuel(n))
+
               try do
                 unquote(bodyq)
               catch
@@ -395,6 +406,7 @@ defmodule TinyLasers.Gate.Lower do
 
           unquote(loop) = fn me, unquote(state_tuple) ->
             if unquote(@runtime).truthy(unquote(testq)) do
+              unquote_splicing(fuel(n))
               unquote(bodyq)
               unquote(updateq)
               me.(me, unquote(state_tuple))
@@ -609,6 +621,8 @@ defmodule TinyLasers.Gate.Lower do
     q =
       quote do
         unquote(loop) = fn me ->
+          unquote_splicing(fuel(n))
+
           try do
             unquote(bodyq)
           catch
@@ -685,7 +699,11 @@ defmodule TinyLasers.Gate.Lower do
   # Object.defineProperty (get/set). (magic-string's classes are flat — no extends/super.)
   defp stmt(%{"type" => t} = n, scope) when t in ["ClassDeclaration", "ClassExpression"] do
     name = (n["id"] && n["id"]["name"]) || "__ggclass"
-    members = (n["body"] && n["body"]["body"]) || []
+    all_members = (n["body"] && n["body"]["body"]) || []
+    # class FIELDS (PropertyDefinition, svelte 5 uses them heavily) are not methods: instance fields become
+    # `this.<key> = <init>` prepended to the ctor; static fields become `C.<key> = <init>` after the class.
+    {prop_defs, members} = Enum.split_with(all_members, &(&1["type"] == "PropertyDefinition"))
+    {static_fields, inst_fields} = Enum.split_with(prop_defs, & &1["static"])
     ctor = Enum.find(members, &(&1["kind"] == "constructor"))
 
     # ES6 inheritance: `class C extends S`. Bind the superclass value to a hidden local so the ctor/methods can
@@ -710,13 +728,25 @@ defmodule TinyLasers.Gate.Lower do
         %{"type" => "BlockStatement", "body" => []}
       end
 
+    # instance-field initializers, prepended to the ctor body (matches Walk: fields-then-body — fine for
+    # value initializers; `this` is always the receiver cell so it is valid even before super()).
+    field_inits =
+      Enum.map(inst_fields, fn f ->
+        expr_stmt(%{"type" => "AssignmentExpression", "operator" => "=",
+          "left" => member_of(%{"type" => "ThisExpression"}, f["key"], f["computed"] == true),
+          "right" => rw.(f["value"] || %{"type" => "Identifier", "name" => "undefined"})})
+      end)
+
+    ctor_body0 = rw.((ctor && ctor["value"]["body"]) || default_body)
+    ctor_body = %{ctor_body0 | "body" => field_inits ++ (ctor_body0["body"] || [])}
+
     ctor_decl = %{
       "type" => "FunctionDeclaration",
       "id" => cid,
       # carry the class's `start` so the ctor's greg key (fnkey) matches the enclosing-scope hoist below.
       "start" => n["start"],
       "params" => (ctor && ctor["value"]["params"]) || [],
-      "body" => rw.((ctor && ctor["value"]["body"]) || default_body)
+      "body" => ctor_body
     }
 
     member_stmts =
@@ -742,6 +772,14 @@ defmodule TinyLasers.Gate.Lower do
         end
       end
 
+    # static fields: `C.<key> = <init>` after the class is defined.
+    static_stmts =
+      Enum.map(static_fields, fn f ->
+        expr_stmt(%{"type" => "AssignmentExpression", "operator" => "=",
+          "left" => member_of(cid, f["key"], f["computed"] == true),
+          "right" => rw.(f["value"] || %{"type" => "Identifier", "name" => "undefined"})})
+      end)
+
     if sup do
       # bind the superclass VALUE in the greg registry (globally reachable from every method/ctor closure — a
       # captured local wouldn't work: `sn` is synthesised during lowering, after the enclosing function's
@@ -749,13 +787,13 @@ defmodule TinyLasers.Gate.Lower do
       scope_f = scope
                 |> Map.put(:funcs, MapSet.put(scope[:funcs] || MapSet.new(), sn))
                 |> Map.put(:fnmap, Map.put(scope[:fnmap] || %{}, sn, sn))
-      {lowered, sc} = stmts([ctor_decl | member_stmts], scope_f)
+      {lowered, sc} = stmts([ctor_decl | member_stmts] ++ static_stmts, scope_f)
       setsuperq = quote(do: unquote(@runtime).greg_set(unquote(sn), unquote(expr(sup, scope))))
       childq = quote(do: unquote(@runtime).greg_get(unquote(fnkey(name, ctor_decl))))
       linkq = quote(do: unquote(@runtime).set_proto_chain(unquote(childq), unquote(@runtime).greg_get(unquote(sn))))
       {block([setsuperq | lowered] ++ [linkq]), sc}
     else
-      stmts([ctor_decl | member_stmts], scope)
+      stmts([ctor_decl | member_stmts] ++ static_stmts, scope)
     end
   end
 
@@ -834,6 +872,7 @@ defmodule TinyLasers.Gate.Lower do
                 :ok
 
               {__ggitem, __ggcur2} ->
+                unquote_splicing(fuel(n))
                 unquote(lvar(vn)) = __ggitem
                 unquote_splicing(destrq)
 
@@ -871,6 +910,7 @@ defmodule TinyLasers.Gate.Lower do
                 unquote(state)
 
               {__ggitem, __ggcur2} ->
+                unquote_splicing(fuel(n))
                 unquote(lvar(vn)) = __ggitem
                 unquote_splicing(destrq)
                 unquote(bodyq)
@@ -1127,9 +1167,7 @@ defmodule TinyLasers.Gate.Lower do
 
     case l do
       %{"type" => "Identifier", "name" => n} ->
-        if scope[:boxed] && MapSet.member?(scope.boxed, n),
-          do: quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(rq))),
-          else: quote(do: unquote(lvar(n)) = unquote(rq))
+        assign_ident(n, rq, scope)
 
       %{"type" => "MemberExpression"} = m ->
         # JS assignment evaluates to the ASSIGNED VALUE. `assign_to` rebuilds the member chain and rebinds the
@@ -1153,10 +1191,31 @@ defmodule TinyLasers.Gate.Lower do
 
   # assign `valq` to a target (Identifier or MemberExpression), rebuilding the chain up to the root identifier.
   # A boxed root is written through its box (never rebound — that would destroy the shared box).
-  defp assign_to(%{"type" => "Identifier", "name" => n}, valq, scope) do
-    if scope[:boxed] && MapSet.member?(scope.boxed, n),
-      do: quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(valq))),
-      else: quote(do: unquote(lvar(n)) = unquote(valq))
+  defp assign_to(%{"type" => "Identifier", "name" => n}, valq, scope), do: assign_ident(n, valq, scope)
+
+  # assign to a bare identifier. A REGISTERED FUNCTION NAME writes through the greg registry (reads resolve
+  # there too) — the `_typeof`/`_regeneratorRuntime` self-reassign idiom `function f(){ return f = <impl>, f() }`
+  # relies on the reassignment being visible to the immediate re-call; a local rebind was invisible to the
+  # greg-backed read, so f() re-called the ORIGINAL forever (svelte's typeof helper spun infinitely, compiled).
+  defp assign_ident(n, valq, scope) do
+    cond do
+      # a LOCAL (param/var) shadows an outer function-declaration of the same name — must match ident's read
+      # precedence (boxed → locals → funcs). Checking funcs first routed a shadowing local param's assignment
+      # to greg while reads still hit the box, so the box never updated (minified marked reuses single-letter
+      # names for both params and top-level helpers — `u` was a param AND a `function u`).
+      scope[:boxed] && MapSet.member?(scope.boxed, n) ->
+        quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(valq)))
+
+      scope[:locals] && MapSet.member?(scope.locals, n) ->
+        quote(do: unquote(lvar(n)) = unquote(valq))
+
+      # a bare function-declaration name (not shadowed) writes through the registry (self-reassign idiom).
+      scope[:funcs] && MapSet.member?(scope.funcs, n) ->
+        quote(do: unquote(@runtime).greg_set(unquote((scope[:fnmap] || %{})[n] || n), unquote(valq)))
+
+      true ->
+        quote(do: unquote(lvar(n)) = unquote(valq))
+    end
   end
 
   defp assign_to(%{"type" => "MemberExpression"} = m, valq, scope) do
@@ -1457,7 +1516,8 @@ defmodule TinyLasers.Gate.Lower do
     nreturns = count_returns(stmts_list)
     last = List.last(stmts_list)
     tail_return? = nreturns == 0 or (nreturns == 1 and last && last["type"] == "ReturnStatement")
-    prelude = hoistq ++ param_box_inits ++ binds ++ argbind
+    ftick = if System.get_env("GGFUEL") && is_integer(body["start"]), do: [quote(do: unquote(@runtime).fn_tick(unquote(body["start"])))], else: []
+    prelude = ftick ++ hoistq ++ param_box_inits ++ binds ++ argbind
 
     # the Erlang compiler is strongly SUPERLINEAR in single-function size (878KB body = 109s, 94KB = 0.6s), so
     # a huge plain function body EXPLODES into sibling module functions: every local is boxed (per-invocation,
