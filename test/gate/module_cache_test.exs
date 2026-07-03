@@ -72,7 +72,7 @@ defmodule TinyLasers.Gate.ModuleCacheTest do
     f = compiler(c)
 
     {:ok, m1} = ModuleCache.resolve("t", "var x = 1; x", f, mc)
-    ModuleCache.checkout(m1)  # pretend a process is mid-execution in m1
+    ModuleCache.checkout(m1, mc)  # pretend a process is mid-execution in m1
 
     # max_entries is 2 → these two more compiles push m1 past the cap and would evict the LRU (m1)…
     {:ok, _m2} = ModuleCache.resolve("t", "var x = 2; x", f, mc)
@@ -82,7 +82,7 @@ defmodule TinyLasers.Gate.ModuleCacheTest do
     assert Code.ensure_loaded?(m1), "in-flight module was purged (would crash the running process)"
     assert apply(m1, :run, []) != nil or true
 
-    ModuleCache.checkin(m1)
+    ModuleCache.checkin(m1, mc)
   end
 
   test "atom_pressure reports the recycle-watchdog signal", %{mc: mc} do

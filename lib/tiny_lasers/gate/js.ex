@@ -87,11 +87,12 @@ defmodule TinyLasers.Gate.Js do
     end
 
     case TinyLasers.Gate.ModuleCache.resolve(tenant, key_source, compile_fun, cache) do
-      {:error, :compile_cap} ->
-        %{result: {:compile_cap, tenant}, output: [], mod: nil}
+      # a compile that was refused (per-tenant cap, or atom-pressure shedding) — a uniform rejection.
+      {:error, reason} ->
+        %{result: {:rejected, reason}, output: [], mod: nil}
 
       {:ok, mod} ->
-        TinyLasers.Gate.ModuleCache.with_module(mod, fn -> Map.put(bounded_run(mod, caps, opts), :mod, mod) end)
+        TinyLasers.Gate.ModuleCache.with_module(mod, fn -> Map.put(bounded_run(mod, caps, opts), :mod, mod) end, cache)
     end
   end
 

@@ -48,7 +48,7 @@ defmodule TinyLasers.Gate.JsInvokeTest do
   test "per-tenant compile cap (atom-DoS guard) surfaces through invoke", %{cache: c} do
     for i <- 1..3, do: assert Js.invoke("t", "var x=#{i}; print(''+x);", cache: c).output == ["#{i}"]
     # 4th DISTINCT program for this tenant exceeds the cap
-    assert %{result: {:compile_cap, "t"}} = Js.invoke("t", "var y=99; print(''+y);", cache: c)
+    assert %{result: {:rejected, :compile_cap}} = Js.invoke("t", "var y=99; print(''+y);", cache: c)
     # an already-cached program still runs
     assert Js.invoke("t", "var x=1; print(''+x);", cache: c).output == ["1"]
   end

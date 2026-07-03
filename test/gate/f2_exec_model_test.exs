@@ -107,7 +107,7 @@ defmodule TinyLasers.Gate.F2ExecModelTest do
           end, timeout: 10_000, max_heap_size: 33_554_432)
 
         out
-      end)
+      end, name)
     end
 
     request.("acme")
