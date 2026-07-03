@@ -29,6 +29,14 @@ defmodule TinyLasers.Gate.AtomWatchdog do
   @doc "Force an immediate check (mainly for tests)."
   def check_now(server \\ __MODULE__), do: GenServer.call(server, :check)
 
+  @doc """
+  Set the node-recycle callback at runtime. A library must not unilaterally restart the node, so the default
+  just logs; the HOST (e.g. nexus's supervisor) wires the real graceful recycle here after boot, typically
+  `fn -> TinyLasers.Gate.Exec.drain(); System.stop() end`.
+  """
+  def set_recycle(server \\ __MODULE__, fun) when is_function(fun, 0),
+    do: GenServer.call(server, {:set_recycle, fun})
+
   @impl true
   def init(opts) do
     cfg = Map.merge(@defaults, Map.new(Keyword.take(opts, [:soft, :hard, :interval_ms])))
@@ -49,6 +57,7 @@ defmodule TinyLasers.Gate.AtomWatchdog do
   def handle_call(:pressure, _from, state), do: {:reply, state.pressure_fun.(), state}
   def handle_call(:health, _from, state), do: {:reply, state.health, state}
   def handle_call(:check, _from, state), do: {:reply, :ok, evaluate(state)}
+  def handle_call({:set_recycle, fun}, _from, state), do: {:reply, :ok, %{state | recycle: fun}}
 
   @impl true
   def handle_info(:tick, state) do
