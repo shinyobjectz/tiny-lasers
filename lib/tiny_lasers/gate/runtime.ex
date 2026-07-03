@@ -1668,7 +1668,18 @@ defmodule TinyLasers.Gate.Runtime do
   defp json_stringify({:fn, _}, _), do: :undefined
   defp json_stringify({:host, _}, _), do: :undefined
   defp json_stringify({:symbol, _, _}, _), do: :undefined
-  defp json_stringify(v, _rest), do: json_enc(v)
+  defp json_stringify(v, rest) do
+    # the 3rd arg (`space`) selects pretty-printing: a number → that many spaces (max 10) per level; a string →
+    # its first 10 chars as the indent unit; anything else → compact.
+    case json_gap(Enum.at(rest, 1)) do
+      "" -> json_enc(v)
+      gap -> json_enc_p(v, gap, "")
+    end
+  end
+
+  defp json_gap(n) when is_number(n), do: String.duplicate(" ", min(10, max(0, trunc(n))))
+  defp json_gap(s) when is_binary(s), do: String.slice(s, 0, 10)
+  defp json_gap(_), do: ""
   defp json_enc(n) when is_number(n), do: to_str(n)
   # NaN / ±Infinity are not valid JSON — serialize as null.
   defp json_enc(x) when x in [:nan, :infinity, :neg_infinity], do: "null"
@@ -1683,6 +1694,33 @@ defmodule TinyLasers.Gate.Runtime do
     keys = okeys(o)
     body = keys |> Enum.map(fn k -> json_quote(k) <> ":" <> json_enc(oget(o, k)) end) |> Enum.join(",")
     "{" <> body <> "}"
+  end
+
+  # pretty (indented) encoder — mirrors json_enc but with newlines + `gap`-indentation for containers, and a
+  # space after each object key's colon (matching JSON.stringify(v, null, space)). Primitives defer to json_enc.
+  defp json_enc_p({t, _} = a, gap, ind) when t in [:arr, :al] do
+    case al(a) do
+      [] -> "[]"
+      list ->
+        ni = ind <> gap
+        "[\n" <> (list |> Enum.map(fn v -> ni <> json_enc_p(v, gap, ni) end) |> Enum.join(",\n")) <> "\n" <> ind <> "]"
+    end
+  end
+
+  defp json_enc_p(v, _gap, _ind)
+       when is_number(v) or is_binary(v) or is_boolean(v) or v in [:null, :undefined, :nan, :infinity, :neg_infinity],
+       do: json_enc(v)
+
+  defp json_enc_p({:fn, _}, _gap, _ind), do: "null"
+
+  defp json_enc_p(o, gap, ind) do
+    case okeys(o) do
+      [] -> "{}"
+      keys ->
+        ni = ind <> gap
+        body = keys |> Enum.map(fn k -> ni <> json_quote(k) <> ": " <> json_enc_p(oget(o, k), gap, ni) end) |> Enum.join(",\n")
+        "{\n" <> body <> "\n" <> ind <> "}"
+    end
   end
 
   defp json_quote(s), do: "\"" <> (s |> String.replace("\\", "\\\\") |> String.replace("\"", "\\\"") |> String.replace("\n", "\\n")) <> "\""

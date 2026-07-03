@@ -1,0 +1,10 @@
+var o = { name: "widget", qty: 3, tags: ["a", "b"] };
+print(Object.keys(o).join(","));
+print(Object.values(o).map(String).join(","));
+print(Object.entries(o).map(function(e){ return e[0] + "=" + e[1]; }).join(";"));
+var merged = Object.assign({}, o, { qty: 5, price: 10 });
+print("" + merged.qty + "," + merged.price + "," + merged.name);
+var spread = { ...o, extra: true };
+print("" + spread.extra + "," + spread.name);
+var { name, qty } = o;
+print(name + ":" + qty);
