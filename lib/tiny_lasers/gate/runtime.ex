@@ -1925,6 +1925,8 @@ defmodule TinyLasers.Gate.Runtime do
   # coercion constructors — `Enum.at(args, 0, default)`, NOT `List.first(args) || default`: guest `false`
   # is Elixir `false`, so `List.first([false]) || :undefined` wrongly yields :undefined (String(false) was
   # "undefined", Number(false) was NaN). String() = "", Number() = 0, Boolean() = false with no args.
+  # Proxy is not callable without `new` (spec: [[Call]] throws).
+  def call({:global, "Proxy"}, _), do: type_error("Constructor Proxy requires 'new'")
   def call({:global, "String"}, []), do: ""
   def call({:global, "String"}, [a | _]), do: to_str(a)
   def call({:global, "Number"}, []), do: 0.0
@@ -2618,7 +2620,12 @@ defmodule TinyLasers.Gate.Runtime do
   def construct({:global, "Array"}, args), do: avec(args)
   # Proxy: {:proxy, target, handler}. Property get/set + method calls route through the handler's traps
   # (falling back to the target). rollup's output bundle is a Proxy over the chunk map.
-  def construct({:global, "Proxy"}, [target, handler | _]), do: {:proxy, target, handler}
+  def construct({:global, "Proxy"}, [target, handler | _]) do
+    unless object_like?(target), do: type_error("Cannot create proxy with a non-object as target")
+    unless object_like?(handler), do: type_error("Cannot create proxy with a non-object as handler")
+    {:proxy, target, handler}
+  end
+  def construct({:global, "Proxy"}, _short), do: type_error("Cannot create proxy with a non-object as target or handler")
   # Date — a deterministic stub (epoch 0). rollup uses it only for timing (Number(new Date())), not output,
   # so a fixed value keeps the bundle byte-identical.
   def construct({:global, "Date"}, args), do: {:date, (case args do [n | _] when is_number(n) -> n; _ -> 0.0 end)}
@@ -2978,7 +2985,12 @@ defmodule TinyLasers.Gate.Runtime do
   # F2 truncates).
   defp bi_int({:bigint, n}), do: n
   defp bi_int(n) when is_integer(n), do: n
-  defp bi_int(n) when is_float(n), do: trunc(n)
+  # NumberToBigInt: a non-integral number (incl. NaN/Infinity, which arrive as :nan/:infinity atoms) is a
+  # RangeError, not a truncation.
+  defp bi_int(n) when is_float(n) do
+    if n == trunc(n) * 1.0, do: trunc(n), else: throw({:gg_throw, mk_error("RangeError", "The number #{n} cannot be converted to a BigInt because it is not an integer")})
+  end
+  defp bi_int(a) when a in [:nan, :infinity, :neg_infinity], do: throw({:gg_throw, mk_error("RangeError", "The number cannot be converted to a BigInt because it is not an integer")})
   defp bi_int(true), do: 1
   defp bi_int(false), do: 0
   defp bi_int(s) when is_binary(s), do: bi_str(s)

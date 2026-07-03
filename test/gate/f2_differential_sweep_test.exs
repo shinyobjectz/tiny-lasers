@@ -248,12 +248,22 @@ defmodule TinyLasers.Gate.F2DifferentialSweepTest do
       |> Enum.with_index()
       |> Enum.flat_map(fn {{label, ast}, i} ->
         Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-        w = try do Walk.run(ast, %{"print" => 0}); Runtime.__output() catch :throw, e -> ["THROW #{inspect(e, limit: 5)}"] ++ Runtime.__output() end
+        w = try do Walk.run(ast, %{"print" => 0}); Runtime.__output() catch :throw, e -> ["THROW #{throw_sig(e)}"] ++ Runtime.__output() end
         Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
-        l = try do apply(m, String.to_atom("case_#{i}"), []); Runtime.__output() catch :throw, e -> ["THROW #{inspect(e, limit: 5)}"] ++ Runtime.__output() end
+        l = try do apply(m, String.to_atom("case_#{i}"), []); Runtime.__output() catch :throw, e -> ["THROW #{throw_sig(e)}"] ++ Runtime.__output() end
         if w == l, do: [], else: ["#{label}: walk=#{inspect(w)} lower=#{inspect(l)}"]
       end)
 
     assert failures == [], "lane divergence:\n  " <> Enum.join(failures, "\n  ")
   end
+
+  # lane-stable throw signature: an error CELL renders by its name+message (cell ids differ across lanes —
+  # each lane allocates a different number of cells before the throw), everything else by inspect.
+  defp throw_sig({tag, v}) when tag in [:gg_throw, :gg_guest_error] do
+    name = try do Runtime.oget(v, "name") rescue _ -> nil catch _, _ -> nil end
+    msg = try do Runtime.oget(v, "message") rescue _ -> nil catch _, _ -> nil end
+    if is_binary(name), do: "#{name}: #{msg}", else: inspect({tag, v}, limit: 5)
+  end
+
+  defp throw_sig(e), do: inspect(e, limit: 5)
 end
