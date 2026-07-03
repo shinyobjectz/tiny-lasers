@@ -282,6 +282,8 @@ defmodule TinyLasers.Gate.Lower do
         # binding's every use is proven read-only + non-escaping.
         s_init = if immut_arr_ok?(d["id"], init, s2), do: Map.put(s2, :immut_hint, true), else: s2
         vq = if init, do: expr(init, s_init), else: :undefined
+        # NamedEvaluation: `const f = function(){}` / `() => {}` / `class {}` infers .name === "f".
+        vq = maybe_named_eval(d["id"], init, vq)
 
         q =
           case d["id"] do
@@ -301,12 +303,12 @@ defmodule TinyLasers.Gate.Lower do
     # a function declaration nested inside another function (name pre-boxed by func/6) is PER-INVOCATION: bind
     # its box. A top-level (program-scope) declaration uses the greg registry (runs once, cross-module late bind).
     if scope[:boxed] && MapSet.member?(scope.boxed, n) do
-      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true)
+      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true, n)
       {quote(do: unquote(@runtime).box_set(unquote(lvar(n)), unquote(fq))), scope}
     else
       key = fnkey(n, f)
       scope = %{scope | funcs: MapSet.put(scope[:funcs] || MapSet.new(), n), fnmap: Map.put(scope[:fnmap] || %{}, n, key)}
-      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true)
+      fq = func(f["params"], f["body"], scope, f["async"] == true, false, f["generator"] == true, n)
       {quote(do: unquote(@runtime).greg_set(unquote(key), unquote(fq))), scope}
     end
   end
@@ -1602,7 +1604,7 @@ defmodule TinyLasers.Gate.Lower do
       |> Map.put(:locals, MapSet.put(scope[:locals] || MapSet.new(), nm))
       |> Map.put(:boxed, MapSet.put(scope[:boxed] || MapSet.new(), nm))
 
-    q = func(f["params"], f["body"], bscope, f["async"] == true, false, f["generator"] == true)
+    q = func(f["params"], f["body"], bscope, f["async"] == true, false, f["generator"] == true, nm)
     ret = Macro.var(:__ggnfe, __MODULE__)
 
     quote do
@@ -1614,7 +1616,7 @@ defmodule TinyLasers.Gate.Lower do
   end
 
   defp expr(%{"type" => t} = f, scope) when t in ["FunctionExpression", "ArrowFunctionExpression"],
-    do: func(f["params"], f["body"], scope, f["async"] == true, t == "ArrowFunctionExpression", f["generator"] == true)
+    do: func(f["params"], f["body"], scope, f["async"] == true, t == "ArrowFunctionExpression", f["generator"] == true, f["id"] && f["id"]["name"])
 
   # yield collects into the current eager-generator frame (see the gen? branch of func/6).
   defp expr(%{"type" => "YieldExpression"} = y, scope) do
@@ -1640,8 +1642,22 @@ defmodule TinyLasers.Gate.Lower do
   # a guest function as a directly-held closure with the (this, args) ABI. Recursion/forward/mutual refs are
   # handled by the late-bound function registry (a function name resolves to Runtime.greg_get at each use),
   # so no Y-combinator is needed here. `this` binds the method receiver; ThisExpression lowers to __ggthis.
-  defp func(params, body, scope, async? \\ false, arrow? \\ false, gen? \\ false) do
+  # NamedEvaluation wrap: when an anonymous function/arrow/class is bound directly to a plain identifier, its
+  # `.name` becomes that identifier. set_fn_name only fills a still-empty name, so this never clobbers a real one.
+  defp maybe_named_eval(%{"type" => "Identifier", "name" => n}, init, vq) when is_map(init) do
+    if anon_fn_like?(init), do: quote(do: unquote(@runtime).set_fn_name(unquote(vq), unquote(n))), else: vq
+  end
+  defp maybe_named_eval(_id, _init, vq), do: vq
+
+  defp anon_fn_like?(%{"type" => "ArrowFunctionExpression"}), do: true
+  defp anon_fn_like?(%{"type" => "FunctionExpression"} = f), do: is_nil(f["id"])
+  defp anon_fn_like?(%{"type" => "ClassExpression"} = c), do: is_nil(c["id"])
+  defp anon_fn_like?(_), do: false
+
+  defp func(params, body, scope, async? \\ false, arrow? \\ false, gen? \\ false, name \\ nil) do
     names = Enum.flat_map(params, &pattern_names/1)
+    # `.length` = count of params BEFORE the first default (AssignmentPattern) or rest (RestElement).
+    arity = params |> Enum.take_while(&(&1["type"] not in ["AssignmentPattern", "RestElement"])) |> length()
     argvar = Macro.var(:__ggargs, __MODULE__)
     # a regular function binds `this` (__ggthis) from its call-time receiver; an ARROW inherits `this`
     # lexically, so it must NOT rebind __ggthis — use a throwaway param and let the body's ThisExpression
@@ -1783,7 +1799,8 @@ defmodule TinyLasers.Gate.Lower do
         is_integer(body["start"]) and is_integer(body["end"]) and
         body["end"] - body["start"] > @explode_min_bytes
 
-    cond do
+    closure_q =
+      cond do
       explode? ->
         explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, body["start"], params)
       # a GENERATOR runs its body to completion eagerly, collecting yields into a frame (gen_begin/gen_end) and
@@ -1854,7 +1871,15 @@ defmodule TinyLasers.Gate.Lower do
             end
           end)
         end
-    end
+      end
+
+    # record `.length` (arity) on the freshly-built function value, and its `.name` when known at the
+    # declaration/expression site. Anonymous fns/arrows (name == nil) get their name later via a
+    # NamedEvaluation wrap (set_fn_name) at the assignment/property site.
+    metaq = quote(do: unquote(@runtime).fn_meta(unquote(closure_q), unquote(arity)))
+    if is_binary(name) and name != "",
+      do: quote(do: unquote(@runtime).set_fn_name(unquote(metaq), unquote(name))),
+      else: metaq
   end
 
   # ── function-body EXPLOSION (compile-time wall) ────────────────────────────────────────────────────────

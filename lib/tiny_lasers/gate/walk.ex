@@ -143,7 +143,7 @@ defmodule TinyLasers.Gate.Walk do
   end
   defp hoist_node(env, sid, %{"type" => "FunctionDeclaration", "id" => %{"name" => n}} = f, _direct?) do
     box = ensure_box(sid, n)
-    Runtime.box_set(box, make_fn(f["params"], f["body"], env, f["async"] == true, false, f["generator"] == true))
+    Runtime.box_set(box, make_fn(f["params"], f["body"], env, f["async"] == true, false, f["generator"] == true, nil, n))
   end
   defp hoist_node(_env, sid, %{"type" => "ClassDeclaration", "id" => %{"name" => n}}, _direct?), do: ensure_box(sid, n)
   defp hoist_node(env, sid, %{"type" => t} = n, _direct?) when t in ["IfStatement", "ForStatement", "ForInStatement",
@@ -185,9 +185,17 @@ defmodule TinyLasers.Gate.Walk do
   defp exec(%{"type" => "VariableDeclaration", "declarations" => ds}, env) do
     Enum.each(ds, fn d ->
       val = if d["init"], do: eval(d["init"], env), else: :undefined
+      # NamedEvaluation: `const f = function(){}` / `() => {}` / `class {}` infers .name === "f".
+      val = named_eval(d["id"], d["init"], val)
       bind_pattern(d["id"], val, env, true)
     end)
   end
+
+  defp named_eval(%{"type" => "Identifier", "name" => n}, %{"type" => t} = init, val)
+       when t in ["ArrowFunctionExpression", "FunctionExpression", "ClassExpression"] do
+    if is_nil(init["id"]), do: Runtime.set_fn_name(val, n), else: val
+  end
+  defp named_eval(_id, _init, val), do: val
 
   defp exec(%{"type" => "FunctionDeclaration"}, _env), do: :ok
   defp exec(%{"type" => "ExpressionStatement", "expression" => e}, env), do: eval(e, env)
@@ -498,7 +506,10 @@ defmodule TinyLasers.Gate.Walk do
   defp bind_pattern(_, _, _, _), do: :ok
 
   # ── functions ───────────────────────────────────────────────────────────────────────────────────────────
-  defp make_fn(params, body, defenv, async?, arrow?, gen? \\ false, self_name \\ nil) do
+  # `.length` = params before the first default (AssignmentPattern) or rest (RestElement).
+  defp fn_arity(params), do: (params || []) |> Enum.take_while(&(&1["type"] not in ["AssignmentPattern", "RestElement"])) |> length()
+
+  defp make_fn(params, body, defenv, async?, arrow?, gen? \\ false, self_name \\ nil, name \\ nil) do
     # a NAMED function expression binds its own name inside its scope (`(function rec(n){ … rec(n-1) … })`),
     # — svelte's minified walker recurses this way. The self-value lands in a box set right after creation.
     selfbox = if self_name, do: Runtime.box(:undefined)
@@ -525,6 +536,10 @@ defmodule TinyLasers.Gate.Walk do
       end)
 
     if self_name, do: Runtime.box_set(selfbox, fnv)
+    # record .length; .name comes from the declaration name, or a named function expression's own id.
+    fnv = Runtime.fn_meta(fnv, fn_arity(params))
+    nm = name || self_name
+    if is_binary(nm) and nm != "", do: Runtime.set_fn_name(fnv, nm)
     fnv
   end
 

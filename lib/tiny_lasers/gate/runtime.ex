@@ -418,6 +418,10 @@ defmodule TinyLasers.Gate.Runtime do
 
   # a function's `.prototype` is a stable per-function cell (ES5 method bag: `Ctor.prototype.m = fn`).
   def oget({:fn, _} = fnv, "prototype"), do: fn_proto(fnv)
+  # `.name`/`.length` are own configurable props: a user override (defineProperty/assignment, in gg_fnprops)
+  # wins; otherwise the value is the metadata recorded at creation (fn_meta/set_fn_name).
+  def oget({:fn, f} = fnv, "name"), do: (case raw_prop(fnv, "name") do :undefined -> fn_name_meta(f); v -> v end)
+  def oget({:fn, f} = fnv, "length"), do: (case raw_prop(fnv, "length") do :undefined -> fn_len_meta(f) * 1.0; v -> v end)
   # a {:getter, g} marker on a function object (static class accessor via defineProperty) is invoked on read.
   def oget({:fn, f} = fnv, k) do
     case Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.get(key_str(k), :undefined) do
@@ -558,6 +562,7 @@ defmodule TinyLasers.Gate.Runtime do
 
   def oget({:proto, _}, "toString"), do: {:protom, :tostring}
   def oget({:proto, _}, "hasOwnProperty"), do: {:protom, :hasown}
+  def oget({:proto, _}, "propertyIsEnumerable"), do: {:protom, :propisenum}
   # Promise duck-typing sentinels: no built-in prototype EXCEPT Promise has then/catch/finally. The generic
   # closure fallback below would return a TRUTHY closure for them on Error/Array/… making every object look
   # thenable and breaking `if (x.then)` promise detection (preact-render-to-string mis-reads a thrown error as
@@ -1344,9 +1349,17 @@ defmodule TinyLasers.Gate.Runtime do
 
   # a mutable-cell instance: `hasOwnProperty`, else a function-valued property is a method with this=the cell.
   def method({:cell, _} = c, "hasOwnProperty", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
-  # every own property is enumerable in F2 (no per-property non-enumerable flag) — used by test262's
+  # cell own props are enumerable in F2 (no per-property non-enumerable flag for cells yet) — used by test262's
   # propertyHelper `Function.prototype.call.bind(Object.prototype.propertyIsEnumerable)`.
   def method({:cell, _} = c, "propertyIsEnumerable", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
+  # function objects: hasOwnProperty / propertyIsEnumerable. `.name`/`.length` are own but NON-enumerable.
+  def method({:fn, _} = f, "hasOwnProperty", [k | _]), do: has_own(f, k)
+  def method({:fn, _} = f, "propertyIsEnumerable", [k | _]), do: prop_is_enum(f, k)
+
+  # is `k` an ENUMERABLE own property of `o`? Function `name`/`length`/`prototype` are own but non-enumerable;
+  # for other object kinds F2 has no per-property enumerable flag yet, so any own property is enumerable.
+  defp prop_is_enum({:fn, _} = o, k), do: (ks = key_str(k); has_own(o, ks) and ks not in ["name", "length", "prototype"])
+  defp prop_is_enum(o, k), do: has_own(o, key_str(k))
 
   def method({:cell, id} = c, name, args) do
     coll = Process.get({:gg_cellcoll, id})
@@ -1548,6 +1561,21 @@ defmodule TinyLasers.Gate.Runtime do
   defp object_static("setPrototypeOf", [o | _]), do: o
   # getOwnPropertyDescriptor(o, k): a data descriptor for an own property, else undefined. esbuild's
   # __copyProps reads `desc.enumerable`; we report own props as enumerable/writable/configurable.
+  # function `.name`/`.length`: own, { writable:false, enumerable:false, configurable:true } per spec.
+  defp object_static("getOwnPropertyDescriptor", [{:fn, _} = fnv, k | _]) do
+    ks = to_str(k)
+    cond do
+      ks in ["name", "length"] ->
+        cell_new([{"value", oget(fnv, ks)}, {"writable", false}, {"enumerable", false}, {"configurable", true}])
+
+      has_own(fnv, ks) ->
+        cell_new([{"value", oget(fnv, ks)}, {"writable", true}, {"enumerable", true}, {"configurable", true}])
+
+      true ->
+        :undefined
+    end
+  end
+
   defp object_static("getOwnPropertyDescriptor", [o, k | _]) do
     ks = to_str(k)
     if ks in Enum.map(okeys(o), &to_str/1),
@@ -1830,6 +1858,8 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:protom, :tostring}, m, []) when m in ["call", "apply"], do: to_string_tag(:undefined)
   def method({:protom, :hasown}, "call", [o, k | _]), do: has_own(o, k)
   def method({:protom, :hasown}, "apply", [o, {:arr, _} = av | _]), do: has_own(o, List.first(al(av)))
+  def method({:protom, :propisenum}, "call", [o, k | _]), do: prop_is_enum(o, k)
+  def method({:protom, :propisenum}, "apply", [o, {:arr, _} = av | _]), do: prop_is_enum(o, List.first(al(av)))
   def method({:fn, _} = f, "call", [this | rest]), do: invoke(f, this, rest)
   def method({:fn, _} = f, "call", []), do: invoke(f, :undefined, [])
   # a function's source is NOT retained through lowering — `fn.toString()` returns a canonical placeholder.
@@ -1960,6 +1990,31 @@ defmodule TinyLasers.Gate.Runtime do
   @doc "A guest function as a DIRECTLY-HELD closure (GC'd, no table). The fun takes `(this, args)`; safe —
   the guest can only invoke it via `call/2` or `invoke/3`, and no codegen path extracts and `apply`s it."
   def closure(f) when is_function(f, 2), do: {:fn, f}
+
+  # ── function name/length metadata (spec own, non-enumerable, non-writable, configurable properties) ──
+  # A fresh fn value records its `.length` (arity = params before the first default/rest) here; the name starts
+  # "" and is filled by set_fn_name at a named declaration/expression or a NamedEvaluation assignment target.
+  # Keyed by the closure `f` (same pattern as :gg_fnprops). Lower/Walk wrap every function value with fn_meta/2.
+  def fn_meta({:fn, f} = v, len) do
+    m = Process.get(:gg_fnmeta, %{})
+    name = case Map.get(m, f) do {n, _} -> n; _ -> "" end
+    Process.put(:gg_fnmeta, Map.put(m, f, {name, len}))
+    v
+  end
+  def fn_meta(v, _len), do: v
+
+  @doc "Assign an inferred name to a still-anonymous function (NamedEvaluation: `const f = () => {}` ⇒ 'f')."
+  def set_fn_name({:fn, f} = v, name) do
+    m = Process.get(:gg_fnmeta, %{})
+    case Map.get(m, f, {"", 0}) do
+      {"", len} -> Process.put(:gg_fnmeta, Map.put(m, f, {to_string(name), len})); v
+      _ -> v
+    end
+  end
+  def set_fn_name(v, _name), do: v
+
+  defp fn_name_meta(f), do: (case Process.get(:gg_fnmeta, %{}) |> Map.get(f) do {n, _} -> n; _ -> "" end)
+  defp fn_len_meta(f), do: (case Process.get(:gg_fnmeta, %{}) |> Map.get(f) do {_, l} -> l; _ -> 0 end)
 
   defp instanceof_chain(nil, _target), do: false
   defp instanceof_chain(proto, target) do
@@ -2890,7 +2945,7 @@ defmodule TinyLasers.Gate.Runtime do
     key = key_str(k)
     case o do
       {:cell, _} -> Map.has_key?(cell_read(o) |> elem(1), key)
-      {:fn, f} -> Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.has_key?(key)
+      {:fn, f} -> key in ["name", "length"] or (Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.has_key?(key))
       {keys, map} when is_map(map) -> Map.has_key?(map, key)
       {:globalobj} -> Process.get(:gg_global, {[], %{}}) |> elem(1) |> Map.has_key?(key)
       {:arr, _} = a -> len = length(al(a)); key == "length" or match?({n, ""} when n >= 0 and n < len, Integer.parse(key))
