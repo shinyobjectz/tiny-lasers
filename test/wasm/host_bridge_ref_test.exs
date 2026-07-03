@@ -23,19 +23,11 @@ defmodule TinyLasers.Wasm.HostBridgeRefTest do
 
   alias TinyLasers.Wasm
 
-  @fixture "test/fixtures/hello_bridge.wasm"
+  @fixture_c "test/fixtures/hello_bridge.wasm"
+  @fixture_go "test/fixtures/hello_bridge_go.wasm"
 
-  test "typed host-call round trip on a plain core module (the WIT-component replacement)" do
-    bytes = File.read!(@fixture)
-    {:ok, mod} = Wasm.decode(bytes)
-
-    # the contract's minimal surface: reactor init + typed entry + guest allocator, ONE host import
-    assert Enum.sort(Map.keys(mod.exports)) == ["_initialize", "run", "tl_alloc"]
-    assert Enum.map(mod.imports, fn {m, n, _t} -> {m, n} end) == [{"env", "host_call"}]
-
-    input = "hello there bridge"
-
-    # BOUNDED like every guest run (memory + wall-clock capped; a runaway guest dies, never the host).
+  # drive any conforming guest through the §5b typed-entry protocol; returns the result string
+  defp round_trip(mod, input) do
     {:completed, result} =
       TinyLasers.Gate.bounded(
         fn ->
@@ -53,10 +45,35 @@ defmodule TinyLasers.Wasm.HostBridgeRefTest do
           Wasm.read_bytes(inst.mem, rptr, rlen)
         end,
         timeout: 30_000,
-        max_heap_size: 268_435_456
+        max_heap_size: 268_435_456,
+        # wasm lane: guest strings live in :atomics linear memory (max_pages-bounded), not BEAM binaries
+        shared_binaries: false
       )
 
+    result
+  end
+
+  test "typed host-call round trip on a plain core module (the WIT-component replacement)" do
+    {:ok, mod} = Wasm.decode(File.read!(@fixture_c))
+
+    # the contract's minimal surface: reactor init + typed entry + guest allocator, ONE host import
+    assert Enum.sort(Map.keys(mod.exports)) == ["_initialize", "run", "tl_alloc"]
+    assert Enum.map(mod.imports, fn {m, n, _t} -> {m, n} end) == [{"env", "host_call"}]
+
     # input echoed + the host concern's upcased answer, joined by the guest — the full round trip
-    assert result == "hello there bridge|HELLO THERE BRIDGE"
+    assert round_trip(mod, "hello there bridge") == "hello there bridge|HELLO THERE BRIDGE"
+  end
+
+  test "the SAME contract from a tinygo guest — Go joins with zero substrate changes" do
+    {:ok, mod} = Wasm.decode(File.read!(@fixture_go))
+
+    # tinygo reactor: same three contract exports (plus tinygo's asyncify/malloc family), and its extra
+    # WASI imports (fd_write/random_get) are covered by the built-in slice — nothing to wire.
+    for e <- ["_initialize", "run", "tl_alloc"], do: assert(Map.has_key?(mod.exports, e))
+    imports = Enum.map(mod.imports, fn {m, n, _t} -> {m, n} end)
+    assert {"env", "host_call"} in imports
+
+    # BYTE-IDENTICAL to the C guest for the same input: one contract, many languages.
+    assert round_trip(mod, "hello there bridge") == "hello there bridge|HELLO THERE BRIDGE"
   end
 end
