@@ -1940,6 +1940,14 @@ defmodule TinyLasers.Gate.Runtime do
     proto == target or instanceof_chain((case proto do {:cell, pid} -> Process.get({:gg_instproto, pid}); _ -> nil end), target)
   end
 
+  # is `v` a non-primitive (an object, for `instanceof Object` / `typeof … === "object"` purposes)? Primitives:
+  # number, string, boolean, null/undefined, NaN/±Infinity, symbol, bigint. Everything else is object-like.
+  defp object_like?(v) do
+    not (is_number(v) or is_binary(v) or is_boolean(v) or is_nil(v) or
+           v in [:null, :undefined, :nan, :infinity, :neg_infinity] or
+           match?({:symbol, _, _}, v) or match?({:bigint, _}, v))
+  end
+
   # ── Promise internals (synchronous/eager; see the method clauses above) ──
   # ── microtask queue: settle/then NEVER run callbacks inline (that recursed settle→then→settle unboundedly,
   # growing the BEAM stack until OOM). Instead callbacks are ENQUEUED and a drain loop runs them iteratively
@@ -2506,6 +2514,10 @@ defmodule TinyLasers.Gate.Runtime do
   def binop(:==, a, b), do: loose_eq(a, b)
   def binop(:!=, a, b), do: not loose_eq(a, b)
   def binop(:in, k, obj), do: has_own(obj, k)
+  # EVERY non-primitive value is `instanceof Object` — all objects inherit Object.prototype. This runtime's
+  # user-instance prototype chains don't explicitly terminate at Object.prototype, so answer Object directly
+  # (before the constructor-specific clauses) for arrays, functions, cells/user-instances, plain objects, etc.
+  def binop(:instanceof, v, {:global, "Object"}), do: object_like?(v)
   # `x instanceof Ctor` — walk x's prototype chain (from `new`/Object.create linkage) for Ctor.prototype.
   def binop(:instanceof, {:cell, id}, {:fn, _} = ctor), do: instanceof_chain(Process.get({:gg_instproto, id}), fn_proto(ctor))
   # instanceof against a built-in constructor: match the cell's `{:proto, name}` chain; every error is also
