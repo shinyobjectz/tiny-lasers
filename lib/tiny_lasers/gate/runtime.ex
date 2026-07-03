@@ -2909,6 +2909,13 @@ defmodule TinyLasers.Gate.Runtime do
   def tdz(:gg_tdz, name), do: throw({:gg_throw, mk_error("ReferenceError", "Cannot access '#{name}' before initialization")})
   def tdz(v, _name), do: v
 
+  # soft TDZ guard: a let/const read across a FUNCTION boundary (an inner closure reading an outer lexical that
+  # may legally initialize before the closure runs). We can't statically prove the timing, so instead of
+  # throwing we degrade the poison to :undefined — the legacy pre-TDZ value, and what the Walk lane does for a
+  # crossed boundary. Its only job is to keep the raw :gg_tdz sentinel from leaking out as an observable value.
+  def tdz_soft(:gg_tdz), do: :undefined
+  def tdz_soft(v), do: v
+
   @doc "Guest `return` — throws to the enclosing function-body catch. Routed through the Runtime so the
   emitted guest module references no external module (keeps the 'only Runtime' confinement invariant literal)."
   def ret(v), do: throw({:gg_return, v})

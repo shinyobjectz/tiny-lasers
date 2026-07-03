@@ -67,10 +67,30 @@ defmodule TinyLasers.Gate.Walk do
     end
   end
 
+  # like find_box, but also reports whether a FUNCTION-body boundary was crossed on the way out to the box.
+  # Used only by the TDZ guard: a poison read within the CURRENT function's scopes is a real temporal-dead-zone
+  # error, but a poison read of an OUTER function's let/const is not decidable here — the enclosing closure may
+  # legally run after that outer binding initializes (rollup registers `.then(() => outerConst)` callbacks a
+  # line before `const outerConst = …`). Matching Lower, cross-boundary poison degrades to the legacy value
+  # (:undefined) rather than throwing. Correctly catching those needs deferred microtask scheduling (bd).
+  defp find_box_b([], _name, crossed), do: {nil, crossed}
+  defp find_box_b([id | rest], name, crossed) do
+    case Map.get(scope_map(id), name) do
+      nil -> find_box_b(rest, name, crossed or Process.get({:wfnboundary, id}, false))
+      box -> {box, crossed}
+    end
+  end
+
   defp get_var(env, name) do
-    case find_box(env, name) do
-      nil -> resolve_global(name)
-      box -> Runtime.box_get(box)
+    case find_box_b(env, name, false) do
+      {nil, _} -> resolve_global(name)
+      {box, crossed} ->
+        case Runtime.box_get(box) do
+          # a let/const box still holding the :gg_tdz poison was read before its declaration ran. Same-function
+          # → throw ReferenceError (temporal dead zone). Across a function boundary → legacy :undefined.
+          :gg_tdz -> if crossed, do: :undefined, else: Runtime.tdz(:gg_tdz, name)
+          v -> v
+        end
     end
   end
 
@@ -105,25 +125,33 @@ defmodule TinyLasers.Gate.Walk do
   end
 
   # ── hoisting ─────────────────────────────────────────────────────────────────────────────────────────────
-  defp hoist([id | _] = env, nodes) when is_list(nodes), do: Enum.each(nodes, &hoist_node(env, id, &1))
+  defp hoist([id | _] = env, nodes) when is_list(nodes), do: Enum.each(nodes, &hoist_node(env, id, &1, true))
 
-  defp hoist_node(env, sid, %{"type" => "VariableDeclaration", "declarations" => ds}) do
-    Enum.each(ds, fn d -> Enum.each(pattern_names(d["id"]), fn n -> ensure_box(env, sid, n) end) end)
+  # `direct?` — this node is an IMMEDIATE child of the scope being hoisted, as opposed to one pulled up from a
+  # nested block/loop by the `var`-hoisting recursion. Only a DIRECT let/const is poisoned to :gg_tdz for this
+  # scope's temporal dead zone; a let/const reached through the recursion belongs to an inner block and gets
+  # its own dead zone when that block is entered, so poisoning it here would false-positive an out-of-block
+  # read (`{ let s } typeof s`). `var` (any depth) is function-scoped and stays :undefined.
+  defp hoist_node(env, sid, node, direct? \\ true)
+
+  defp hoist_node(_env, sid, %{"type" => "VariableDeclaration", "kind" => kind, "declarations" => ds}, direct?) do
+    poison? = direct? and kind in ["let", "const"]
+    Enum.each(ds, fn d -> Enum.each(pattern_names(d["id"]), fn n -> ensure_box(sid, n, poison? and n != "arguments") end) end)
   end
-  defp hoist_node(env, sid, %{"type" => "FunctionDeclaration", "id" => %{"name" => n}} = f) do
-    box = ensure_box(env, sid, n)
+  defp hoist_node(env, sid, %{"type" => "FunctionDeclaration", "id" => %{"name" => n}} = f, _direct?) do
+    box = ensure_box(sid, n)
     Runtime.box_set(box, make_fn(f["params"], f["body"], env, f["async"] == true, false, f["generator"] == true))
   end
-  defp hoist_node(env, sid, %{"type" => "ClassDeclaration", "id" => %{"name" => n}}), do: ensure_box(env, sid, n)
-  defp hoist_node(env, sid, %{"type" => t} = n) when t in ["IfStatement", "ForStatement", "ForInStatement",
+  defp hoist_node(_env, sid, %{"type" => "ClassDeclaration", "id" => %{"name" => n}}, _direct?), do: ensure_box(sid, n)
+  defp hoist_node(env, sid, %{"type" => t} = n, _direct?) when t in ["IfStatement", "ForStatement", "ForInStatement",
        "ForOfStatement", "WhileStatement", "DoWhileStatement", "BlockStatement", "TryStatement",
        "SwitchStatement", "LabeledStatement"] do
     n |> Map.drop(["type", "test", "id"]) |> Map.values() |> Enum.each(&hoist_children(env, sid, &1))
   end
-  defp hoist_node(_env, _sid, _), do: :ok
+  defp hoist_node(_env, _sid, _, _direct?), do: :ok
 
   defp hoist_children(env, sid, l) when is_list(l), do: Enum.each(l, &hoist_children(env, sid, &1))
-  defp hoist_children(env, sid, %{"type" => _} = n), do: hoist_node(env, sid, n)
+  defp hoist_children(env, sid, %{"type" => _} = n), do: hoist_node(env, sid, n, false)
   defp hoist_children(_env, _sid, _), do: :ok
 
   # hoist a name into scope `sid`. Check ONLY that scope — NOT the ancestor chain: a `var`/function
@@ -131,9 +159,9 @@ defmodule TinyLasers.Gate.Walk do
   # the whole chain (the old behaviour) made a nested function's `var t2` REUSE an outer scope's `t2` box, so
   # two unrelated functions shared one mutable cell (acorn's readWord1 `for (var t2 = true)` clobbered an
   # aria-query helper of the same name — a cross-scope aliasing bug that only surfaces at bundle scale).
-  defp ensure_box(_env, sid, name) do
+  defp ensure_box(sid, name, poison? \\ false) do
     case Map.get(scope_map(sid), name) do
-      nil -> declare([sid], name, :undefined)
+      nil -> declare([sid], name, if(poison?, do: :gg_tdz, else: :undefined))
       box -> box
     end
   end
@@ -481,7 +509,7 @@ defmodule TinyLasers.Gate.Walk do
           declare(scope, "this", this)
           declare(scope, "arguments", Runtime.avec(args))
         end
-        Enum.each(Enum.flat_map(params || [], &pattern_names/1), fn n -> ensure_box([hd(scope)], hd(scope), n) end)
+        Enum.each(Enum.flat_map(params || [], &pattern_names/1), fn n -> ensure_box(hd(scope), n) end)
         bind_params(params || [], args, scope)
 
         if gen? do
@@ -507,6 +535,10 @@ defmodule TinyLasers.Gate.Walk do
   end
 
   defp run_body(body, env, async?) do
+    # this scope is a function body — mark it so the TDZ guard can tell a same-function poison read (a real
+    # dead-zone error) from an outer-function one (a possibly-legit late closure read; see find_box_b).
+    Process.put({:wfnboundary, hd(env)}, true)
+
     thunk = fn ->
       case body do
         %{"type" => "BlockStatement", "body" => b} ->
@@ -553,7 +585,7 @@ defmodule TinyLasers.Gate.Walk do
         end
 
         cparams = (ctor && ctor["value"]["params"]) || []
-        Enum.each(Enum.flat_map(cparams, &pattern_names/1), fn nm -> ensure_box([hd(s)], hd(s), nm) end)
+        Enum.each(Enum.flat_map(cparams, &pattern_names/1), fn nm -> ensure_box(hd(s), nm) end)
         bind_params(cparams, args, s)
         cond do
           # explicit ctor: fields first (approximation of after-super; harmless for value initializers), then body.
@@ -601,7 +633,7 @@ defmodule TinyLasers.Gate.Walk do
       declare(s, "arguments", Runtime.avec(args))
       if sup, do: declare(s, "__superval", sup)
       params = fnode["params"] || []
-      Enum.each(Enum.flat_map(params, &pattern_names/1), fn nm -> ensure_box([hd(s)], hd(s), nm) end)
+      Enum.each(Enum.flat_map(params, &pattern_names/1), fn nm -> ensure_box(hd(s), nm) end)
       bind_params(params, args, s)
       if fnode["generator"] == true do
         Runtime.gen_begin()
@@ -614,6 +646,7 @@ defmodule TinyLasers.Gate.Walk do
   end
 
   defp run_ctor_body(%{"type" => "BlockStatement", "body" => b}, env) do
+    Process.put({:wfnboundary, hd(env)}, true)
     hoist(env, b)
     try do
       exec_all(b, env)

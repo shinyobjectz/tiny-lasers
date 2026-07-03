@@ -32,7 +32,7 @@ defmodule TinyLasers.Gate.Lower do
     vars = collect_vars(body) |> Enum.uniq()
     boxed = boxed_set(vars, body)
     lexical = collect_lexical(body) |> MapSet.new()
-    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}, immut_arrs: immut_arr_vars(body), lexical: lexical}
+    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}, immut_arrs: immut_arr_vars(body), lexical: lexical, soft_lexical: MapSet.new(), lexical_all: lexical}
     {stmts, _scope} = stmts(body, scope0)
     # top-level `this` IS the global object; pre-bind hoisted vars (a boxed var gets a box — JS var hoisting).
     # a let/const is hoisted to the :gg_tdz poison (TDZ) rather than :undefined (var).
@@ -1723,11 +1723,20 @@ defmodule TinyLasers.Gate.Lower do
     # nested scope has its own candidates + its own uses; do not inherit the enclosing scope's set).
     bscope = Map.put(bscope, :immut_arrs, immut_arr_vars(body))
 
-    # TDZ: guard reads of THIS body's own let/const (same-scope use-before-declaration — the real test262
-    # cluster). The lexical set is deliberately NOT inherited into nested functions: an inner closure captures an
-    # outer let/const by value at closure-creation time, and real toolchains (rollup's chunk emitters) legally
-    # call such closures after the outer init has run, so inheriting the poison-guard false-positives on them.
-    bscope = Map.put(bscope, :lexical, own_lexical)
+    # TDZ. Two guard sets:
+    #   :lexical      — THIS body's own let/const: a same-function-scope use-before-declaration THROWS
+    #                   (Runtime.tdz) — the real test262 cluster.
+    #   :soft_lexical — let/const from an ENCLOSING function, read here across the boundary: we can't statically
+    #                   prove whether this closure runs before or after the outer init, so we DEGRADE the poison
+    #                   to :undefined (Runtime.tdz_soft) instead of throwing — matching the Walk lane and the
+    #                   legacy value real toolchains rely on, while keeping the raw :gg_tdz sentinel from leaking
+    #                   out as an observable value.
+    enclosing_lexical = MapSet.difference(scope[:lexical_all] || MapSet.new(), shadow)
+    bscope =
+      bscope
+      |> Map.put(:lexical, own_lexical)
+      |> Map.put(:soft_lexical, MapSet.difference(enclosing_lexical, own_lexical))
+      |> Map.put(:lexical_all, MapSet.union(enclosing_lexical, own_lexical))
 
     # a boxed PARAM-bound name needs its box pre-created before the (possibly destructuring) bind writes it.
     param_box_inits =
@@ -2035,15 +2044,25 @@ defmodule TinyLasers.Gate.Lower do
 
   defp ident(n, scope) do
     lexical? = scope[:lexical] && MapSet.member?(scope.lexical, n)
+    soft? = scope[:soft_lexical] && MapSet.member?(scope.soft_lexical, n)
+
+    # wrap a local read with the right TDZ guard: own let/const throws on poison; an enclosing-scope let/const
+    # read across the boundary degrades poison to :undefined; a plain var/local reads through untouched.
+    guard = fn read ->
+      cond do
+        lexical? -> quote(do: unquote(@runtime).tdz(unquote(read), unquote(n)))
+        soft? -> quote(do: unquote(@runtime).tdz_soft(unquote(read)))
+        true -> read
+      end
+    end
 
     cond do
       # a boxed local reads through its box (shared mutable closure variable)
       scope[:boxed] && MapSet.member?(scope.boxed, n) ->
-        read = quote(do: unquote(@runtime).box_get(unquote(lvar(n))))
-        if lexical?, do: quote(do: unquote(@runtime).tdz(unquote(read), unquote(n))), else: read
+        guard.(quote(do: unquote(@runtime).box_get(unquote(lvar(n)))))
 
       MapSet.member?(scope.locals, n) ->
-        if lexical?, do: quote(do: unquote(@runtime).tdz(unquote(lvar(n)), unquote(n))), else: lvar(n)
+        guard.(lvar(n))
       # numeric global constants
       n == "Infinity" and not MapSet.member?(scope.locals, n) -> :infinity
       n == "NaN" and not MapSet.member?(scope.locals, n) -> :nan
