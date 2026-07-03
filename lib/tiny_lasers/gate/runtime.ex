@@ -292,6 +292,31 @@ defmodule TinyLasers.Gate.Runtime do
 
   # write to an array IN PLACE: numeric key → element slot; named key → the props map. Returns the same handle.
   defp arr_put({:al, _}, k, _v), do: immut_arr_violation!("arr_put #{key_str(k)}")
+  # `arr.length = n` RESIZES the array: truncate (drop the tail) or extend with undefined holes. Load-bearing
+  # for speculative-parse rollback — sucrase truncates its token array via `tokens.length = savedLen` to undo a
+  # trial parse; without this the trial tokens leak and every arrow/typed construct double-emits (wb-9rldq).
+  defp arr_put({:arr, _} = a, "length", v) do
+    n = arr_length!(to_number(v))
+    list = al(a)
+    cur = length(list)
+
+    cond do
+      n == cur -> a
+      n < cur -> aset_l(a, Enum.take(list, n))
+      n < 1_000_000 -> aset_l(a, list ++ List.duplicate(:undefined, n - cur))
+      # a huge sparse length (`a.length = 2**20+`) stays logical — don't materialize millions of holes.
+      true -> a
+    end
+  end
+
+  # a valid array length: integral, 0 ≤ n < 2^32, else RangeError ("Invalid array length").
+  defp arr_length!(v) do
+    t = if is_float(v), do: trunc(v), else: v
+    if not is_number(v) or t * 1.0 != v * 1.0 or t < 0 or t >= 4_294_967_296,
+      do: throw({:gg_throw, mk_error("RangeError", "Invalid array length")}),
+      else: t
+  end
+
   defp arr_put({:arr, _} = a, k, v) do
     list = al(a)
     props = ap(a)
