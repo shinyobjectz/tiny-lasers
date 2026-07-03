@@ -79,6 +79,53 @@ defmodule TinyLasers.Gate.F2ExecModelTest do
     assert warm_us < 1_000, "a warm hit should be well under 1ms, got #{warm_us}us"
   end
 
+  test "END-TO-END: the full warm-module/cold-process path — compile once, run N times, correct + flat" do
+    name = :"em_#{System.unique_integer([:positive])}"
+    {:ok, _} = ModuleCache.start_link(name: name, compile_cap: 100, max_entries: 100)
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    src = """
+    var n = 0; for (var i = 0; i < 200; i++) { var t = [i, i * 2]; n += t[1]; }
+    print('R[' + n + ']');
+    """
+
+    cf = fn module_name ->
+      Agent.update(counter, &(&1 + 1))
+      compile_into(module_name, src)
+    end
+
+    # one full production invocation: cache-resolve (compile once) -> checkout -> FRESH bounded process -> checkin
+    request = fn tenant ->
+      {:ok, mod} = ModuleCache.resolve(tenant, src, cf, name)
+
+      ModuleCache.with_module(mod, fn ->
+        {:completed, out} =
+          TinyLasers.Gate.bounded(fn ->
+            Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
+            try do apply(mod, :run, []) catch :throw, _ -> :ok end
+            Runtime.__output()
+          end, timeout: 10_000, max_heap_size: 33_554_432)
+
+        out
+      end)
+    end
+
+    request.("acme")
+    :erlang.garbage_collect()
+    m0 = :erlang.memory(:total)
+
+    # 1000 requests through the SAME warm module, each a fresh cold process
+    Enum.each(1..1000, fn _ -> assert request.("acme") == ["R[39800]"], "request produced wrong/inconsistent output" end)
+
+    :erlang.garbage_collect()
+    grew = :erlang.memory(:total) - m0
+
+    assert Agent.get(counter, & &1) == 1, "the module must compile exactly ONCE across 1000 requests"
+    # FLAT: 1000 fresh-process requests must not accumulate host memory (the per-request object store dies with
+    # each process). A long-lived guest doing the same work would grow ~O(requests); this stays bounded.
+    assert grew < 20_000_000, "host memory grew #{div(grew, 1024)}KB across 1000 requests — expected ~flat"
+  end
+
   defp compile_into(name, src) do
     body = Lower.program(Js.parse(src), %{"print" => 0})
     [{m, bin}] = Code.compile_quoted(quote do (defmodule unquote(name) do def run, do: unquote(body) end) end)
