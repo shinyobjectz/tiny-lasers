@@ -53,11 +53,54 @@ defmodule TinyLasers.Gate.Js do
     TinyLasers.Gate.assert_safe_to_compile!(quoted)
     [{mod, bin}] = Code.compile_quoted(quoted)
 
+    Map.merge(bounded_run(mod, caps, opts), %{binary: bin, mod: mod})
+  end
+
+  @doc """
+  **Warm-module / cold-process invocation — the production execution model (Track A / J3).**
+
+  Resolves `src` (for `tenant`) to a compiled module via the per-tenant `ModuleCache`, compiling ONCE per
+  distinct {tenant, source, grants} and reusing it across requests (bounds the permanent atom mint — see
+  `f2-execution-model`), then runs it in a FRESH resource-bounded process so the per-request object store dies
+  with the process (flat memory across requests — see `f2-object-store-leak`). The invocation is bracketed with
+  `checkout`/`checkin` for purge safety. Isolation is per-tenant: the cache key folds in `granted`, and the
+  module name derives from `sha256(tenant <> source <> grants)` — no cross-tenant sharing.
+
+  Requires the `ModuleCache` GenServer to be running (start it in your supervision tree, or pass `:cache`).
+  Returns `%{result, output, mod}`; `%{result: {:compile_cap, tenant}}` if the tenant hit its distinct-program
+  ceiling (atom-DoS guard).
+  """
+  def invoke(tenant, src, opts \\ []) when is_binary(tenant) and is_binary(src) do
+    cache = Keyword.get(opts, :cache, TinyLasers.Gate.ModuleCache)
+    caps = Keyword.get(opts, :caps, default_caps())
+    granted = Keyword.get(opts, :granted, default_granted())
+    # fold the grants into the cache key: the same source with different capabilities compiles to a DIFFERENT
+    # module (grants change which identifiers resolve to host caps), so they must not share a cache entry.
+    key_source = src <> <<0>> <> :erlang.term_to_binary(granted)
+
+    compile_fun = fn modname ->
+      body = Lower.program(parse(src), granted)
+      quoted = quote do (defmodule unquote(modname) do def run, do: unquote(body) end) end
+      TinyLasers.Gate.assert_safe_to_compile!(quoted)
+      [{mod, bin}] = Code.compile_quoted(quoted)
+      {mod, bin}
+    end
+
+    case TinyLasers.Gate.ModuleCache.resolve(tenant, key_source, compile_fun, cache) do
+      {:error, :compile_cap} ->
+        %{result: {:compile_cap, tenant}, output: [], mod: nil}
+
+      {:ok, mod} ->
+        TinyLasers.Gate.ModuleCache.with_module(mod, fn -> Map.put(bounded_run(mod, caps, opts), :mod, mod) end)
+    end
+  end
+
+  # Run a compiled guest module in a MEMORY- and TIME-bounded isolated process. A guest that allocates or loops
+  # forever is killed (max_heap_size{kill} / wall-clock) — it can NEVER exhaust the host. Compilation already
+  # happened (a finite, host-controlled step); only the arbitrary guest RUN is sandboxed here.
+  defp bounded_run(mod, caps, opts) do
     ctx = %{caps: caps, tenant_root: "/tenant", fs: %{}}
 
-    # Execute in a MEMORY- and TIME-bounded isolated process. A guest that allocates or loops forever is killed
-    # (max_heap_size{kill} / wall-clock) — it can NEVER exhaust the host. Compilation already happened above (a
-    # finite, host-controlled step); only the arbitrary guest RUN is sandboxed here.
     bounded =
       TinyLasers.Gate.bounded(
         fn ->
@@ -84,10 +127,10 @@ defmodule TinyLasers.Gate.Js do
       )
 
     case bounded do
-      {:completed, {res, output}} -> %{result: res, output: output, binary: bin, mod: mod}
-      {:timeout} -> %{result: {:timeout, nil}, output: [], binary: bin, mod: mod}
-      {:killed, reason} -> %{result: {:resource_killed, reason}, output: [], binary: bin, mod: mod}
-      {:down, reason} -> %{result: {:crash, :down, reason}, output: [], binary: bin, mod: mod}
+      {:completed, {res, output}} -> %{result: res, output: output}
+      {:timeout} -> %{result: {:timeout, nil}, output: []}
+      {:killed, reason} -> %{result: {:resource_killed, reason}, output: []}
+      {:down, reason} -> %{result: {:crash, :down, reason}, output: []}
     end
   end
 
