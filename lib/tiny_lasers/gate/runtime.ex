@@ -466,6 +466,11 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
+  # a generator/iterator object: Symbol.iterator returns itself; the protocol methods read as first-class values.
+  def oget({:geniter, _} = g, {:symbol, "@@iterator", _}), do: closure(fn _this, _ -> g end)
+  def oget({:geniter, _}, k) when k in ["next", "return", "throw"], do: closure(fn this, args -> method(this, k, args) end)
+  def oget({:geniter, _}, _), do: :undefined
+
   # regex properties (marked's edit() helper reads `re.source` to compose patterns as strings).
   def oget({:regex, _re, src, _flags}, "source"), do: src
   def oget({:regex, _re, _src, flags}, "flags"), do: flags
@@ -1112,6 +1117,27 @@ defmodule TinyLasers.Gate.Runtime do
   end
   # a computed-member CALL `arr[i](args)` / `ta[i](args)` — the callee is the element (a function), invoked
   # with `this` = the container (rollup: `nodeConverters[nodeType](position, buffer)`).
+  # generator/iterator protocol: next() advances the (eagerly-collected) values, return()/throw() terminate it.
+  def method({:geniter, id}, "next", _args) do
+    {list, pos} = Process.get({:gg_geniter, id}, {[], 0})
+
+    if pos < length(list) do
+      Process.put({:gg_geniter, id}, {list, pos + 1})
+      iter_result(Enum.at(list, pos), false)
+    else
+      iter_result(:undefined, true)
+    end
+  end
+
+  def method({:geniter, id}, "return", args) do
+    Process.put({:gg_geniter, id}, {[], 0})
+    iter_result(List.first(args) || :undefined, true)
+  end
+
+  def method({:geniter, _}, "throw", args), do: throw({:gg_throw, List.first(args) || :undefined})
+  # `it[Symbol.iterator]()` (computed-method-call dispatch) returns the iterator itself.
+  def method({:geniter, _} = g, {:symbol, "@@iterator", _}, _), do: g
+
   def method({t, _} = a, k, args) when t in [:arr, :al] and is_number(k), do: invoke(oget(a, k), a, args)
   def method({:ta, _, _, _, _} = ta, k, args) when is_number(k), do: invoke(oget(ta, k), ta, args)
 
@@ -2396,11 +2422,20 @@ defmodule TinyLasers.Gate.Runtime do
     Process.put(:gg_genstack, [Enum.reverse(iter(v)) ++ h | t])
     :undefined
   end
+  # An EAGER generator: the body ran to completion collecting its yields; return a proper ITERATOR object (not a
+  # bare array) so the explicit protocol — `it.next()` → {value, done}, `.return()`, `Symbol.iterator`, and
+  # for-of/spread — all work. (Eager evaluation means two-way `next(v)` can't feed the value back to a paused
+  # yield; that needs lazy suspension, a separate/bigger change.)
   def gen_end do
     [h | t] = Process.get(:gg_genstack)
     Process.put(:gg_genstack, t)
-    avec(Enum.reverse(h))
+    id = __id()
+    Process.put({:gg_geniter, id}, {Enum.reverse(h), 0})
+    {:geniter, id}
   end
+
+  # a fresh { value, done } result object (immutable direct-term object).
+  defp iter_result(value, done?), do: {["value", "done"], %{"value" => value, "done" => done?}}
 
   # ── closures (handles, never raw funs) ──
 
@@ -2926,6 +2961,12 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "for-of iteration items: array elements, or a string's chars (1-char binaries)."
   def iter({t, _} = a) when t in [:arr, :al], do: al(a)
+  # spread/for-of over a generator consumes its REMAINING values (from the current cursor position).
+  def iter({:geniter, id}) do
+    {list, pos} = Process.get({:gg_geniter, id}, {[], 0})
+    Process.put({:gg_geniter, id}, {list, length(list)})
+    Enum.drop(list, pos)
+  end
   # a cell backed by a real array (class extends Array) iterates its elements (for-of / spread over a NodeList).
   def iter({:cell, id}) do
     case Process.get({:gg_cellarr, id}) do
@@ -2946,6 +2987,7 @@ defmodule TinyLasers.Gate.Runtime do
   # both lanes steps through these cursors, re-reading the collection each step. Other iterables (strings,
   # typed arrays) keep snapshot semantics.
   def iter_start({t, _} = a) when t in [:arr, :al], do: {:gg_acur, a, 0}
+  def iter_start({:geniter, _} = g), do: {:gg_gcur, g}
   def iter_start({:set, id}), do: {:gg_scur, id, 0}
   def iter_start({:map, id}), do: {:gg_mcur, id, 0}
   def iter_start(other), do: {:gg_lcur, iter(other)}
@@ -2953,6 +2995,18 @@ defmodule TinyLasers.Gate.Runtime do
   def iter_next({:gg_acur, a, i}) do
     l = al(a)
     if i < length(l), do: {Enum.at(l, i), {:gg_acur, a, i + 1}}, else: :done
+  end
+
+  # generator cursor — advances the shared {:gg_geniter} position, so for-of and explicit .next() stay in sync.
+  def iter_next({:gg_gcur, {:geniter, id} = g}) do
+    {list, pos} = Process.get({:gg_geniter, id}, {[], 0})
+
+    if pos < length(list) do
+      Process.put({:gg_geniter, id}, {list, pos + 1})
+      {Enum.at(list, pos), {:gg_gcur, g}}
+    else
+      :done
+    end
   end
 
   def iter_next({:gg_scur, id, i}) do
