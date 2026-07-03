@@ -1987,6 +1987,28 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
+  @doc """
+  True while an ASYNC CONTINUATION is executing — a microtask (`.then`/`await` resumption) or a macrotask
+  (`setTimeout`) callback dispatched by the event-loop drain, as opposed to code on the guest's direct
+  synchronous call stack. The TDZ guard uses this to disambiguate a cross-function-boundary read of a
+  not-yet-initialized let/const: at depth 0 the closure was invoked SYNCHRONOUSLY (an IIFE run during the
+  initializer) — a real temporal-dead-zone error that throws; at depth >0 the closure was invoked by the async
+  machinery AFTER the sync frame that initializes the binding (rollup's `.then(() => outerConst)`), a legit
+  late read that degrades to :undefined. In the eager promise model these two only differ by drain depth.
+  """
+  def in_async_continuation?, do: Process.get(:gg_mt_depth, 0) > 0
+
+  # run one queued continuation thunk with the async-continuation depth bumped for its dynamic extent.
+  defp run_cont(thunk) do
+    d = Process.get(:gg_mt_depth, 0)
+    Process.put(:gg_mt_depth, d + 1)
+    try do
+      thunk.()
+    after
+      Process.put(:gg_mt_depth, d)
+    end
+  end
+
   # Runaway-promise-loop detector for the MICROtask queue (real Promise.then chains). Genuine async is bounded
   # in the thousands; a truly unbounded microtask reschedule is a bug, caught as a catchable guest_error.
   @microtask_cap 5_000_000
@@ -2022,7 +2044,7 @@ defmodule TinyLasers.Gate.Runtime do
   defp drain_micro(n) do
     case mq_take() do
       nil -> :ok
-      thunk -> thunk.(); drain_micro(n + 1)
+      thunk -> run_cont(thunk); drain_micro(n + 1)
     end
   end
 
@@ -2035,7 +2057,7 @@ defmodule TinyLasers.Gate.Runtime do
 
       macros ->
         Enum.each(macros, fn thunk ->
-          (try do thunk.() catch :throw, _ -> :ok end)
+          (try do run_cont(thunk) catch :throw, _ -> :ok end)
           drain_micro(0)
         end)
 
@@ -2140,7 +2162,7 @@ defmodule TinyLasers.Gate.Runtime do
       {:pending, _, _} when n < @microtask_cap ->
         case mq_take() do
           nil -> :ok
-          thunk -> thunk.(); drain_until(p, n + 1)
+          thunk -> run_cont(thunk); drain_until(p, n + 1)
         end
       _ -> :ok
     end
@@ -2909,12 +2931,14 @@ defmodule TinyLasers.Gate.Runtime do
   def tdz(:gg_tdz, name), do: throw({:gg_throw, mk_error("ReferenceError", "Cannot access '#{name}' before initialization")})
   def tdz(v, _name), do: v
 
-  # soft TDZ guard: a let/const read across a FUNCTION boundary (an inner closure reading an outer lexical that
-  # may legally initialize before the closure runs). We can't statically prove the timing, so instead of
-  # throwing we degrade the poison to :undefined — the legacy pre-TDZ value, and what the Walk lane does for a
-  # crossed boundary. Its only job is to keep the raw :gg_tdz sentinel from leaking out as an observable value.
-  def tdz_soft(:gg_tdz), do: :undefined
-  def tdz_soft(v), do: v
+  # soft TDZ guard: a let/const read across a FUNCTION boundary (an inner closure reading an outer lexical).
+  # Whether this is a real dead-zone error depends on WHEN the closure runs relative to the outer declaration,
+  # which the eager promise model collapses into drain depth: invoked synchronously (an IIFE during the
+  # initializer, in_async_continuation? == false) it IS a temporal-dead-zone error and throws; invoked by the
+  # async machinery after the sync frame initializes the binding (a `.then`/`await`/`setTimeout` callback) it
+  # is a legit late read and degrades to :undefined. Either way the raw :gg_tdz sentinel never leaks out.
+  def tdz_soft(:gg_tdz, name), do: (if in_async_continuation?(), do: :undefined, else: tdz(:gg_tdz, name))
+  def tdz_soft(v, _name), do: v
 
   @doc "Guest `return` — throws to the enclosing function-body catch. Routed through the Runtime so the
   emitted guest module references no external module (keeps the 'only Runtime' confinement invariant literal)."

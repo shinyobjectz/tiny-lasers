@@ -2051,7 +2051,7 @@ defmodule TinyLasers.Gate.Lower do
     guard = fn read ->
       cond do
         lexical? -> quote(do: unquote(@runtime).tdz(unquote(read), unquote(n)))
-        soft? -> quote(do: unquote(@runtime).tdz_soft(unquote(read)))
+        soft? -> quote(do: unquote(@runtime).tdz_soft(unquote(read), unquote(n)))
         true -> read
       end
     end

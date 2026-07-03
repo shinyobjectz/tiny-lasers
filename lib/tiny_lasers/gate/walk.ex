@@ -87,8 +87,11 @@ defmodule TinyLasers.Gate.Walk do
       {box, crossed} ->
         case Runtime.box_get(box) do
           # a let/const box still holding the :gg_tdz poison was read before its declaration ran. Same-function
-          # → throw ReferenceError (temporal dead zone). Across a function boundary → legacy :undefined.
-          :gg_tdz -> if crossed, do: :undefined, else: Runtime.tdz(:gg_tdz, name)
+          # → always a temporal-dead-zone error (throw). Across a function boundary → a real dead-zone only if
+          # the closure ran SYNCHRONOUSLY during the initializer (in_async_continuation? == false); if it was
+          # invoked later by the async machinery it is a legit late read that degrades to :undefined.
+          :gg_tdz ->
+            if crossed and Runtime.in_async_continuation?(), do: :undefined, else: Runtime.tdz(:gg_tdz, name)
           v -> v
         end
     end

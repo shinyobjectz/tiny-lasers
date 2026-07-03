@@ -5,14 +5,16 @@ defmodule TinyLasers.Gate.F2TdzTest do
   read of that name is guarded, so accessing it before its declaration executes throws a `ReferenceError` —
   matching JS semantics and the test262 negatives in `language/statements/{let,const}/*use-before-init*`.
 
-  Scope of coverage (deliberate): SAME-FUNCTION-scope use-before-declaration. Neither lane poisons across a
-  function boundary — an inner closure reads an outer let/const that may legally initialize before the closure
-  actually runs (rollup registers `.then(() => outerConst)` a line before `const outerConst = …`), and a
-  microtask drain can interleave before the declaration; so a cross-boundary poison read degrades to the legacy
-  `:undefined` rather than throwing. (Correctly catching only the *synchronous* cross-boundary case — an IIFE
-  run during the initializer — needs deferred-scheduling fidelity we don't yet guarantee; see bd follow-up.)
-  `arguments` is never poisoned (auto-bound, always available). Locked so the guard neither regresses nor
-  over-fires, and so the two lanes agree.
+  Coverage:
+    * SAME-FUNCTION-scope use-before-declaration → ReferenceError.
+    * CROSS-function-boundary read of a not-yet-initialized outer let/const → disambiguated by whether the
+      closure runs synchronously or as a deferred async continuation. A synchronous invocation during the
+      initializer (an IIFE) is a real dead zone → throws; a deferred one (`.then`/`await`/`setTimeout` — e.g.
+      rollup's `.then(() => outerConst)` registered a line before `const outerConst = …`) runs after the
+      binding initializes → legit late read → the poison degrades to `:undefined`. In the eager promise model
+      the two differ only by async-continuation depth (`Runtime.in_async_continuation?`).
+    * `arguments` is never poisoned (auto-bound, always available).
+  Locked so the guard neither regresses nor over-fires, and so the Lower and Walk lanes agree.
   """
   use ExUnit.Case, async: false
 
@@ -125,11 +127,15 @@ defmodule TinyLasers.Gate.F2TdzTest do
     assert both("function f(){ return arguments.length; } print(''+f(1,2,3));") == ["3"]
   end
 
-  test "a cross-function-boundary read of a not-yet-initialized let does NOT throw (both lanes conservative)" do
-    # an inner closure may legally run after the outer const initializes; neither lane poisons across the
-    # boundary (rollup's `.then(() => outerConst)` pattern). The IIFE here runs during init, but we still
-    # degrade to undefined rather than throwing — the deliberate, gate-preserving conservative choice.
-    assert both("var out; (function(){ out = typeof w; })(); let w = 1; print(out);") == ["undefined"]
+  test "a SYNCHRONOUS cross-boundary read during the initializer is a real dead zone (both lanes throw)" do
+    # an IIFE invoked during the outer const's initializer reads it before init — ReferenceError, like real JS
+    assert both("const w = (function(){ return w; })(); print(''+w);") == ["THREW:ReferenceError"]
+  end
+
+  test "a DEFERRED closure reading an outer let runs after init — legit late read, no throw (both lanes)" do
+    # the .then callback is a microtask; it runs after `const lardp = 42` initializes (rollup's exact pattern),
+    # so the cross-boundary read is NOT a dead zone — the poison degrades to undefined, nothing throws.
+    assert both("Promise.resolve(1).then(function(){ return typeof lardp; }); const lardp = 42; print('ok');") == ["ok"]
   end
 
   test "a let read out of its block scope is not poisoned (Walk block scoping)" do
