@@ -78,6 +78,27 @@ defmodule TinyLasers.Gate.F2RegexSyntaxTest do
     assert both("try { new RegExp('a','z'); print('NO'); } catch(e){ print('SE:'+(e instanceof SyntaxError)); }") == ["SE:true"]
   end
 
+  test "out-of-order class ranges and {max<min} quantifiers throw" do
+    assert catches("'^[z-a]$'") == ["SE:true"]
+    assert catches("'0{2,1}'") == ["SE:true"]
+  end
+
+  test "new RegExp(regexObj, flags) rebuilds from the source; empty flags inherit" do
+    assert both("var r = new RegExp(new RegExp('ab'), 'g'); print(r.global+','+r.source);") == ["true,ab"]
+    assert both("var r = new RegExp(/xy/i); print(r.ignoreCase+','+r.source);") == ["true,xy"]
+  end
+
+  test "constructor-object property protocol (S15.10.5.1): prototype is own, non-enum, non-deletable" do
+    assert both("print(''+RegExp.hasOwnProperty('prototype'));") == ["true"]
+    assert both("print(''+(delete RegExp.prototype));") == ["false"]
+    assert both("print(''+RegExp.prototype.isPrototypeOf(/a/));") == ["true"]
+    assert both("print(''+(RegExp.prototype.constructor===RegExp));") == ["true"]
+  end
+
+  test "\\xHH at or above 0x80 matches the CODE POINT in UTF-8 guest strings" do
+    assert both("var a=/\\xFF/.exec('\\u00FF'); print(a===null?'null':a[0]==='\\u00FF'?'cp':'byte');") == ["cp"]
+  end
+
   test "JS-valid patterns the toolchains rely on must NOT throw" do
     assert both("print(''+/aa*?/.test('aaa'));") == ["true"]
     assert both("print(''+/[^]/.test('x'));") == ["true"]

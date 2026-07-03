@@ -576,6 +576,7 @@ defmodule TinyLasers.Gate.Runtime do
     do: closure(fn _this, args -> method({:global, name}, k, args) end)
   def oget({:global, _}, _), do: :undefined
 
+  def oget({:proto, name}, "constructor"), do: {:global, name}
   def oget({:proto, _}, "toString"), do: {:protom, :tostring}
   def oget({:proto, _}, "hasOwnProperty"), do: {:protom, :hasown}
   def oget({:proto, _}, "propertyIsEnumerable"), do: {:protom, :propisenum}
@@ -931,6 +932,8 @@ defmodule TinyLasers.Gate.Runtime do
   # ── regex as a CAPABILITY (backed by Elixir Regex, returns guest values, stays confined). A regex is a
   # guest-safe term `{:regex, compiled, source, flags}`; the guest can only pass it to the regex methods. ──
   @doc "Compile a guest regex. JS flags i/m/s/u/x map to Elixir opts; g is applied at match/replace time."
+  def regex(source, flags) when is_binary(source) and not is_binary(flags), do: regex(source, "")
+
   def regex(source, flags) when is_binary(source) do
     # JS-invalid patterns/flags throw a catchable SyntaxError (test262 S15.10.1). The validator is
     # CONSERVATIVE: it flags only shapes that are definitely invalid in JS (leading/stacked quantifiers,
@@ -984,6 +987,13 @@ defmodule TinyLasers.Gate.Runtime do
       _ -> rx_u(rest, ["\\u{" | acc])
     end
   end
+  defp rx_u(<<"\\x", a, b, rest::binary>>, acc)
+       when (a in ?8..?9 or a in ?a..?f or a in ?A..?F) and (b in ?0..?9 or b in ?a..?f or b in ?A..?F) do
+    # \xHH at/above 0x80: PCRE in byte mode matches the raw BYTE, but guest strings are UTF-8 — spell it
+    # \x{HH} so the existing \x{ rule forces unicode mode and it matches the CODE POINT (\xFF = "ÿ").
+    rx_u(rest, ["\\x{" <> <<a, b>> <> "}" | acc])
+  end
+
   defp rx_u(<<"\\u", a, b, c, d, rest::binary>>, acc)
        when a in ?0..?9 or a in ?a..?f or a in ?A..?F do
     if Enum.all?([b, c, d], &(&1 in ?0..?9 or &1 in ?a..?f or &1 in ?A..?F)),
@@ -1009,6 +1019,7 @@ defmodule TinyLasers.Gate.Runtime do
     case jsre_class(rest) do
       {:ok, tail} -> jsre(tail, :atom, d)
       :unterminated -> "Unterminated character class"
+      :bad_range -> "Range out of order in character class"
     end
   end
   # group open: consume the (?: (?= (?! (?<= (?<! (?<name> prefix so the '?' is not read as a quantifier
@@ -1039,6 +1050,9 @@ defmodule TinyLasers.Gate.Runtime do
   # {n} / {n,} / {n,m} quantifier shape; a non-quantifier '{' is a literal atom (Annex B)
   defp jsre(<<?{, rest::binary>> = all, prev, d) do
     case jsre_braces(rest) do
+      :bad_quant ->
+        "numbers out of order in {} quantifier"
+
       {:quant, tail} ->
         case prev do
           :atom -> jsre(tail, :quant, d)
@@ -1055,6 +1069,11 @@ defmodule TinyLasers.Gate.Runtime do
 
   defp jsre_class(<<?\\, _, rest::binary>>), do: jsre_class(rest)
   defp jsre_class(<<?], rest::binary>>), do: {:ok, rest}
+  # literal range a-b with both endpoints plain (non-escape) chars: out of order => SyntaxError. `-` before
+  # `]` or next to an escape stays literal/unchecked (conservative).
+  defp jsre_class(<<lo, ?-, hi, rest::binary>>) when lo != ?\\ and hi != ?\\ and hi != ?] do
+    if lo > hi, do: :bad_range, else: jsre_class(rest)
+  end
   defp jsre_class(<<_, rest::binary>>), do: jsre_class(rest)
   defp jsre_class(<<>>), do: :unterminated
 
@@ -1063,8 +1082,10 @@ defmodule TinyLasers.Gate.Runtime do
     case Integer.parse(bin) do
       {_n, <<?}, tail::binary>>} -> {:quant, tail}
       {_n, <<?,, ?}, tail::binary>>} -> {:quant, tail}
-      {_n, <<?,, rest2::binary>>} ->
+      {n, <<?,, rest2::binary>>} ->
         case Integer.parse(rest2) do
+          # {min,max} with max < min is a SyntaxError (surfaced via the :bad_quant marker)
+          {m, <<?}, _tail::binary>>} when m < n -> :bad_quant
           {_m, <<?}, tail::binary>>} -> {:quant, tail}
           _ -> :literal
         end
@@ -1072,6 +1093,8 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
+  # `new RegExp(re)` / `new RegExp(re, "g")` — rebuild from the source regex; explicit flags override.
+  def regex({:regex, _, src, oldflags}, flags), do: regex(src, (if flags in ["", :undefined], do: oldflags, else: flags))
   def regex(_source, _flags), do: {:regex, ~r/(?!)/, "", ""}
 
   defp global?({:regex, _re, _src, flags}), do: String.contains?(flags, "g")
@@ -1498,6 +1521,19 @@ defmodule TinyLasers.Gate.Runtime do
 
   # is `k` an ENUMERABLE own property of `o`? Function `name`/`length`/`prototype` are own but non-enumerable;
   # for other object kinds F2 has no per-property enumerable flag yet, so any own property is enumerable.
+  # which built-in prototype "owns" a value (isPrototypeOf tag match)
+  defp proto_of_tag({:regex, _, _, _}), do: "RegExp"
+  defp proto_of_tag({t, _}) when t in [:arr, :al], do: "Array"
+  defp proto_of_tag({:fn, _}), do: "Function"
+  defp proto_of_tag(v) when is_binary(v), do: "String"
+  defp proto_of_tag(v) when is_number(v), do: "Number"
+  defp proto_of_tag(v) when is_boolean(v), do: "Boolean"
+  defp proto_of_tag({:date, _}), do: "Date"
+  defp proto_of_tag({:set, _}), do: "Set"
+  defp proto_of_tag({:map, _}), do: "Map"
+  defp proto_of_tag({:promise, _}), do: "Promise"
+  defp proto_of_tag(_), do: nil
+
   defp prop_is_enum({:fn, _} = o, k), do: (ks = key_str(k); has_own(o, ks) and ks not in ["name", "length", "prototype"])
   defp prop_is_enum(o, k), do: (ks = key_str(k); has_own(o, ks) and prop_enumerable?(o, ks))
 
@@ -1757,6 +1793,7 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
+  defp odelete({:global, _}, k), do: key_str(k) != "prototype"
   defp odelete(_, _), do: true
 
   defp object_static("getPrototypeOf", _), do: :undefined
@@ -2069,6 +2106,15 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:protom, :tostring}, m, []) when m in ["call", "apply"], do: to_string_tag(:undefined)
   def method({:protom, :hasown}, "call", [o, k | _]), do: has_own(o, k)
   def method({:protom, :hasown}, "apply", [o, {:arr, _} = av | _]), do: has_own(o, List.first(al(av)))
+  # constructor objects: RegExp.hasOwnProperty('prototype') etc. (S15.10.5.1). 'prototype' is own,
+  # non-enumerable, non-deletable; the statics list covers the callable own props.
+  def method({:global, g}, "hasOwnProperty", [k | _]) when is_binary(g),
+    do: key_str(k) == "prototype" or key_str(k) in @global_static_methods
+  def method({:global, _}, "propertyIsEnumerable", [_ | _]), do: false
+  # prototype objects: RegExp.prototype.isPrototypeOf(re) — match the value's tag to the prototype's name.
+  def method({:proto, name}, "isPrototypeOf", [v | _]), do: proto_of_tag(v) == name
+  def method({:proto, _}, "hasOwnProperty", [k | _]), do: key_str(k) == "constructor"
+
   def method({:protom, :propisenum}, "call", [o, k | _]), do: prop_is_enum(o, k)
   def method({:protom, :propisenum}, "apply", [o, {:arr, _} = av | _]), do: prop_is_enum(o, List.first(al(av)))
   def method({:fn, _} = f, "call", [this | rest]), do: invoke(f, this, rest)
