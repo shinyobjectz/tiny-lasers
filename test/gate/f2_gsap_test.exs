@@ -33,9 +33,9 @@ defmodule TinyLasers.Gate.F2GsapTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled GSAP module not confined"
 
-    # BOUNDED (memory + wall-clock) — a runaway guest is killed, never the test host. NODRAIN: GSAP's ticker
-    # self-reschedules; the seek() output is synchronous, so we skip the macrotask drain (raw bounded, not
-    # bounded_run, which would drain and spin the ticker forever).
+    # BOUNDED (memory + wall-clock) under a HOST-SAFE cap (1 GB). GSAP now peaks ~150 MB: the ticker's infinite
+    # setTimeout reschedule loop is caught by the microtask runaway-detector (@microtask_cap) before it can leak
+    # the former ~2.9 GB of {:gg_prom}/{:gg_box} entries. NODRAIN: the seek() output is synchronous.
     ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
 
     {:completed, out} =
@@ -43,7 +43,7 @@ defmodule TinyLasers.Gate.F2GsapTest do
         Runtime.__init(ctx)
         try do apply(m, :run, []) catch :throw, _ -> :ok end
         Runtime.__output()
-      end, timeout: 120_000, max_heap_size: 536_870_912)
+      end, timeout: 120_000, max_heap_size: 134_217_728)
 
     line = Enum.find(out, &String.starts_with?(&1, marker <> "[")) || flunk("no #{marker} output")
     line |> String.replace_prefix(marker <> "[", "") |> String.replace_suffix("]", "") |> String.trim()
@@ -55,13 +55,10 @@ defmodule TinyLasers.Gate.F2GsapTest do
     assert run_lower("gsap/ease_bundle.js", "EASE_OK") == golden
   end
 
-  # SKIP (not a guard regression): the bounded runner correctly refuses to run this — GSAP's tween/timeline/
-  # stagger execution PEAKS above 4GB in F2 (measured: ~2.9GB retained in the old heap at completion, higher at
-  # peak), so a host-safe memory cap kills it. That is the guardrail doing its job. The underlying F2 GSAP
-  # memory-retention issue (a few tweens + seeks should not retain gigabytes — likely process-dict objects/boxes
-  # not reclaimed) is tracked SEPARATELY; byte-identity for the engine is still covered by the easing test above
-  # (and was verified end-to-end earlier when GSAP ran unbounded). Un-skip once the memory issue is fixed.
-  @tag skip: "GSAP tween/timeline peaks >4GB in F2 — bounded run is killed by the memory cap; F2 memory-retention issue tracked separately"
+  # UN-SKIPPED (was: peaked >4GB). Root-caused to GSAP's ticker rescheduling a fake-macrotask setTimeout
+  # (Promise.resolve().then) forever inside the end-of-program microtask drain — it looped up to the old 5M
+  # @microtask_cap, leaking ~10M {:gg_prom} + ~15M {:gg_box}. Lowering the runaway-detector cap to 250K bounds it
+  # to ~150 MB (byte-identical output is printed before the drain, so unchanged). Runs byte-identical to node.
   @tag timeout: 300_000
   test "GSAP tween + timeline + stagger sample byte-identical to node (compiled, confined)" do
     golden = File.read!(Path.join(@conf, "gsap/gsap_golden.txt")) |> String.trim()

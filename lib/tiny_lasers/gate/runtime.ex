@@ -1906,7 +1906,13 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
-  @microtask_cap 5_000_000
+  # Runaway-promise-loop detector. Set well above any legitimate microtask chain (rollup/svelte/preact/solid
+  # async is bounded in the thousands) but low enough that a genuinely-unbounded reschedule loop — e.g. GSAP's
+  # ticker, which reschedules a fake-macrotask setTimeout (Promise.resolve().then) forever — is caught before it
+  # leaks gigabytes of never-reclaimed {:gg_prom}/{:gg_box} entries (see f2-object-store-leak). The overflow is a
+  # guest_error the guest can catch; output printed before the end-of-program drain is unaffected. (The proper
+  # fix is real macrotask semantics so setTimeout does NOT reschedule within the microtask drain — tracked.)
+  @microtask_cap 250_000
 
   @doc "Drain all pending microtasks iteratively (called by the run harness after the top-level guest code)."
   def drain_microtasks(n \\ 0)
