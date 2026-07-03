@@ -932,6 +932,21 @@ defmodule TinyLasers.Gate.Runtime do
   # guest-safe term `{:regex, compiled, source, flags}`; the guest can only pass it to the regex methods. ──
   @doc "Compile a guest regex. JS flags i/m/s/u/x map to Elixir opts; g is applied at match/replace time."
   def regex(source, flags) when is_binary(source) do
+    # JS-invalid patterns/flags throw a catchable SyntaxError (test262 S15.10.1). The validator is
+    # CONSERVATIVE: it flags only shapes that are definitely invalid in JS (leading/stacked quantifiers,
+    # unterminated group/class, unmatched paren, bad flags) — anything it is unsure about still compiles,
+    # and a PCRE-only compile failure keeps the silent never-match fallback (JS-valid PCRE-invalid patterns
+    # like surrogate ranges must not start throwing).
+    case js_pattern_error(source) do
+      nil -> :ok
+      msg -> throw({:gg_throw, mk_error("SyntaxError", "Invalid regular expression: /" <> source <> "/: " <> msg)})
+    end
+
+    if flags != (flags |> String.graphemes() |> Enum.uniq() |> Enum.join()) or
+         not Enum.all?(String.graphemes(flags), &(&1 in ~w(d g i m s u v y))) do
+      throw({:gg_throw, mk_error("SyntaxError", "Invalid regular expression flags: " <> flags)})
+    end
+
     base = flags |> String.graphemes() |> Enum.filter(&(&1 in ~w(i m s u x))) |> Enum.join()
 
     # keep `source` (the JS-visible .source) as-is, but translate JS-only regex syntax before PCRE compile.
@@ -976,6 +991,86 @@ defmodule TinyLasers.Gate.Runtime do
       else: rx_u(<<a, b, c, d, rest::binary>>, ["\\u" | acc])
   end
   defp rx_u(<<ch, rest::binary>>, acc), do: rx_u(rest, [<<ch>> | acc])
+
+  # ── conservative JS pattern validator ──────────────────────────────────────────────────────────────────
+  # A tiny scanner over the ORIGINAL JS pattern. Tracks whether the previous token can take a quantifier
+  # (:atom = yes; :quant/:lazy = a second quantifier is invalid; :none/:open/:alt = nothing to repeat) plus
+  # group depth and class state. Returns nil (ok) or an error message. Anything exotic falls through as :atom
+  # so we never false-positive on it.
+  defp js_pattern_error(src), do: jsre(src, :none, 0)
+
+  defp jsre(<<>>, _prev, 0), do: nil
+  defp jsre(<<>>, _prev, _depth), do: "Unterminated group"
+  # escapes: backslash + anything is an atom (multi-char escapes like \u{..} continue as atoms harmlessly)
+  defp jsre(<<?\\, _, rest::binary>>, _prev, d), do: jsre(rest, :atom, d)
+  defp jsre(<<?\\>>, _prev, _d), do: "\\ at end of pattern"
+  # character class: scan to the closing unescaped ] (']' first char is literal-in-class per JS)
+  defp jsre(<<?[, rest::binary>>, _prev, d) do
+    case jsre_class(rest) do
+      {:ok, tail} -> jsre(tail, :atom, d)
+      :unterminated -> "Unterminated character class"
+    end
+  end
+  # group open: consume the (?: (?= (?! (?<= (?<! (?<name> prefix so the '?' is not read as a quantifier
+  defp jsre(<<?(, ??, ?<, c, rest::binary>>, _prev, d) when c in [?=, ?!], do: jsre(rest, :open, d + 1)
+  defp jsre(<<?(, ??, ?<, rest::binary>>, _prev, d) do
+    case String.split(rest, ">", parts: 2) do
+      [_name, tail] -> jsre(tail, :open, d + 1)
+      _ -> "Invalid named capture group"
+    end
+  end
+  defp jsre(<<?(, ??, c, rest::binary>>, _prev, d) when c in [?:, ?=, ?!], do: jsre(rest, :open, d + 1)
+  defp jsre(<<?(, rest::binary>>, _prev, d), do: jsre(rest, :open, d + 1)
+  defp jsre(<<?), rest::binary>>, _prev, d) when d > 0, do: jsre(rest, :atom, d - 1)
+  defp jsre(<<?), _rest::binary>>, _prev, _d), do: "Unmatched ')'"
+  defp jsre(<<?|, rest::binary>>, _prev, d), do: jsre(rest, :alt, d)
+  # * and + : need a preceding atom; never valid after another quantifier
+  defp jsre(<<c, rest::binary>>, prev, d) when c in [?*, ?+] do
+    if prev == :atom, do: jsre(rest, :quant, d), else: "Nothing to repeat"
+  end
+  # ? : quantifier after an atom, LAZY modifier after a quantifier (a*?), otherwise invalid
+  defp jsre(<<??, rest::binary>>, prev, d) do
+    case prev do
+      :atom -> jsre(rest, :quant, d)
+      :quant -> jsre(rest, :lazy, d)
+      _ -> "Nothing to repeat"
+    end
+  end
+  # {n} / {n,} / {n,m} quantifier shape; a non-quantifier '{' is a literal atom (Annex B)
+  defp jsre(<<?{, rest::binary>> = all, prev, d) do
+    case jsre_braces(rest) do
+      {:quant, tail} ->
+        case prev do
+          :atom -> jsre(tail, :quant, d)
+          p when p in [:quant, :lazy] -> "Nothing to repeat"
+          _ -> "Nothing to repeat"
+        end
+
+      :literal ->
+        <<_, tail::binary>> = all
+        jsre(tail, :atom, d)
+    end
+  end
+  defp jsre(<<_, rest::binary>>, _prev, d), do: jsre(rest, :atom, d)
+
+  defp jsre_class(<<?\\, _, rest::binary>>), do: jsre_class(rest)
+  defp jsre_class(<<?], rest::binary>>), do: {:ok, rest}
+  defp jsre_class(<<_, rest::binary>>), do: jsre_class(rest)
+  defp jsre_class(<<>>), do: :unterminated
+
+  # parse {digits(,digits?)?} — returns {:quant, tail} when it is a real quantifier shape, else :literal
+  defp jsre_braces(bin) do
+    case Integer.parse(bin) do
+      {_n, <<?}, tail::binary>>} -> {:quant, tail}
+      {_n, <<?,, ?}, tail::binary>>} -> {:quant, tail}
+      {_n, <<?,, rest2::binary>>} ->
+        case Integer.parse(rest2) do
+          {_m, <<?}, tail::binary>>} -> {:quant, tail}
+          _ -> :literal
+        end
+      _ -> :literal
+    end
+  end
 
   def regex(_source, _flags), do: {:regex, ~r/(?!)/, "", ""}
 
