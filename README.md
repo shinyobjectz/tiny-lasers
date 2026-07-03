@@ -8,6 +8,20 @@ It works for more than JavaScript. Rust, Go, C, C++ — anything that compiles t
 
 This document explains the problem, the two pieces of technology the solution is built from, the specific design decisions that make it fast instead of just safe, and the proof that it actually works. It's long on purpose — the goal isn't a quick pitch, it's that you finish reading and actually understand how this works, not just that it works.
 
+### At a glance — measured, not asserted
+
+| | Result |
+|---|---|
+| **Real toolchains, byte-identical to Node** | rollup · Svelte 5 compiler · Preact & Solid SSR · marked · GSAP — unmodified npm packages, same bytes as `node`, fully confined |
+| **Correctness vs Node** | a continuous differential gate runs real programs on both and compares byte-for-byte — *identical, or it fails loudly; never silently wrong* |
+| **Tail latency under a heavy neighbor** | a fast request stays **~0.6 ms** while a genuinely-heavy request runs; the same load pins a Node event loop to **~2,500 ms** (≈4,000×) |
+| **Multi-tenant throughput** | **~9,000 requests/sec** across 8 tenants through the supervised runtime — memory flat, metering exact |
+| **Sandbox escapes** | 60+ deliberate breakout attempts across the red-team suites — **all blocked** |
+| **Resource exhaustion** | a guest that loops, allocates, or recurses forever is killed by a hard memory + time bound — **host untouched** |
+| **Automated tests** | 170+ passing (conformance + security + the execution model), re-checked on every change |
+
+> The honest envelope: Node/V8 is faster for a single request; tiny-lasers wins **under concurrent load with mixed request costs** — where a slow request can't poison your fast ones — and it's safe by construction. It is *not* a numeric compute engine (see [Part 8](#part-8--where-this-wins-and-where-it-doesnt)).
+
 ---
 
 ## Part 1 — The problem
