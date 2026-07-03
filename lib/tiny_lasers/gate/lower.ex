@@ -1710,6 +1710,10 @@ defmodule TinyLasers.Gate.Lower do
         %{scope | locals: inner, boxed: MapSet.difference(MapSet.union(inherited, boxed), fndecls)}
       end
 
+    # object-store-leak Lever 2: recompute the immutable-array-safe set over THIS function's own body (a
+    # nested scope has its own candidates + its own uses; do not inherit the enclosing scope's set).
+    bscope = Map.put(bscope, :immut_arrs, immut_arr_vars(body))
+
     # a boxed PARAM-bound name needs its box pre-created before the (possibly destructuring) bind writes it.
     param_box_inits =
       for v <- Enum.uniq(names), MapSet.member?(bscope.boxed, v),
