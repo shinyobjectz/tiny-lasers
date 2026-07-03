@@ -127,16 +127,25 @@ defmodule TinyLasers.Gate do
     ref = make_ref()
     max_heap = Keyword.get(opts, :max_heap_size, @default_max_heap_words)
     timeout = Keyword.get(opts, :timeout, @default_run_timeout)
+    # include_shared_binaries (OTP 27+): count OFF-HEAP refc binaries toward the limit. Without it an F2/JS
+    # guest that builds large strings (`"x".repeat(1e5)` in a loop — big binaries live off-heap) would evade
+    # the heap kill and OOM the host before the wall-clock timeout. THIS closes the binary-bomb vector — so it
+    # DEFAULTS ON and F2/JS callers must never disable it.
+    #
+    # The WASM lane passes `shared_binaries: false`: a wasm guest's strings live in LINEAR MEMORY (an
+    # `:atomics` array, hard-bounded by max_pages), never as BEAM binaries — the vector this flag closes does
+    # not exist there. Meanwhile the accounting charges the PARENT binary per sub-binary reference:
+    # interpreting a big module slices its multi-MB binary thousands of times, so a 9.6MB module "exceeds" a
+    # 4GB cap in ms (render_text: killed with the flag, clean exit-2 in <500ms without — A/B-measured,
+    # wb-hsrw8). False kill, zero added safety there → opt-out for wasm-lane callers only.
+    shared? = Keyword.get(opts, :shared_binaries, true)
 
     {pid, mon} =
       :erlang.spawn_opt(
         fn -> send(parent, {ref, fun.()}) end,
         [
           :monitor,
-          # include_shared_binaries (OTP 27+): count OFF-HEAP refc binaries toward the limit. Without it a guest
-          # that builds large strings (`"x".repeat(1e5)` in a loop — big binaries live off-heap) would evade the
-          # heap kill and OOM the host before the wall-clock timeout. THIS closes the binary-bomb vector.
-          {:max_heap_size, %{size: max_heap, kill: true, error_logger: false, include_shared_binaries: true}},
+          {:max_heap_size, %{size: max_heap, kill: true, error_logger: false, include_shared_binaries: shared?}},
           {:message_queue_data, :off_heap}
         ]
       )
