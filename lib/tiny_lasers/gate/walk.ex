@@ -22,7 +22,7 @@ defmodule TinyLasers.Gate.Walk do
   @globals ~w(Object Array Function Math JSON String Number Boolean RegExp
               Error TypeError RangeError SyntaxError ReferenceError EvalError URIError
               Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder
-              Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
+              Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array Uint8ClampedArray BigInt64Array BigUint64Array ArrayBuffer DataView)
   @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt __ggMacro)
 
   # ── entry ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -322,10 +322,20 @@ defmodule TinyLasers.Gate.Walk do
           Runtime.put_accessor(acc, key, kind, eval(v, env))
         %{"key" => k, "value" => v, "computed" => computed} ->
           key = if computed, do: eval(k, env), else: key_of(k)
-          Runtime.oput(acc, key, eval(v, env))
+          Runtime.oput(acc, key, obj_prop_value(v, key, computed, env))
       end
     end)
   end
+
+  # NamedEvaluation for object properties: an anonymous fn/arrow/class value with a STATIC key takes that key
+  # as its inferred `.name` (`{ foo(){} }.foo.name === "foo"`). Named fn expressions keep their own name.
+  defp obj_prop_value(%{"type" => t} = v, key, false, env)
+       when t in ["ArrowFunctionExpression", "FunctionExpression", "ClassExpression"] do
+    val = eval(v, env)
+    if is_nil(v["id"]) and is_binary(key), do: Runtime.set_fn_name(val, key), else: val
+  end
+
+  defp obj_prop_value(v, _key, _computed, env), do: eval(v, env)
 
   defp eval(%{"type" => t} = f, env) when t in ["FunctionExpression", "ArrowFunctionExpression"],
     do: make_fn(f["params"], f["body"], env, f["async"] == true, t == "ArrowFunctionExpression", f["generator"] == true, f["id"] && f["id"]["name"])

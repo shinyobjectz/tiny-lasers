@@ -1019,8 +1019,9 @@ defmodule TinyLasers.Gate.Lower do
           pairs =
             Enum.map(props, fn p ->
               kq = if p["computed"], do: expr(p["key"], scope), else: key_of(p["key"])
-              quote(do: {unquote(kq), unquote(expr(p["value"], scope))})
+              {kq, prop_value(p, scope)}
             end)
+            |> Enum.map(fn {kq, vq} -> quote(do: {unquote(kq), unquote(vq)}) end)
 
           quote(do: unquote(@runtime).cell_new(unquote(pairs)))
       end
@@ -1035,13 +1036,32 @@ defmodule TinyLasers.Gate.Lower do
             kq = if p["computed"], do: expr(k, scope), else: key_of(k)
             quote(do: unquote(@runtime).put_accessor(unquote(acc), unquote(kq), unquote(kind), unquote(expr(v, scope))))
 
-          %{"key" => k, "value" => v, "computed" => computed} ->
+          %{"key" => k, "value" => _v, "computed" => computed} ->
             kq = if computed, do: expr(k, scope), else: key_of(k)
-            quote(do: unquote(@runtime).oput(unquote(acc), unquote(kq), unquote(expr(v, scope))))
+            quote(do: unquote(@runtime).oput(unquote(acc), unquote(kq), unquote(prop_value(p, scope))))
         end
       end)
     end
   end
+
+  # an object property whose value is an anonymous fn/arrow/class and whose key is a STATIC (non-computed)
+  # string gets that key as its inferred `.name` (NamedEvaluation, spec 13.2.5.5): `{ foo(){} }.foo.name` is
+  # "foo". Shorthand methods and `k: function(){}` alike; a named fn expression keeps its own name.
+  defp prop_value(%{"value" => v, "key" => k} = p, scope) do
+    vq = expr(v, scope)
+
+    if not p["computed"] and anon_fn_like?(v) do
+      name = static_key_name(k)
+      if name, do: quote(do: unquote(@runtime).set_fn_name(unquote(vq), unquote(name))), else: vq
+    else
+      vq
+    end
+  end
+
+  defp static_key_name(%{"type" => "Identifier", "name" => n}), do: n
+  defp static_key_name(%{"type" => "Literal", "value" => v}) when is_binary(v), do: v
+  defp static_key_name(%{"type" => "Literal", "value" => v}) when is_number(v), do: to_string(v)
+  defp static_key_name(_), do: nil
 
   defp expr(%{"type" => "TemplateLiteral", "quasis" => qs, "expressions" => es}, scope) do
     quasis = Enum.map(qs, fn q -> (q["value"] && q["value"]["cooked"]) || "" end)
@@ -2064,7 +2084,7 @@ defmodule TinyLasers.Gate.Lower do
   defp assigned_names(_), do: []
 
   # ── helpers ──
-  @globals ~w(Object Array Function Math JSON String Number Boolean Error TypeError RangeError SyntaxError ReferenceError EvalError URIError RegExp Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
+  @globals ~w(Object Array Function Math JSON String Number Boolean Error TypeError RangeError SyntaxError ReferenceError EvalError URIError RegExp Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array Uint8ClampedArray BigInt64Array BigUint64Array ArrayBuffer DataView)
   @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt __ggMacro)
 
   defp ident(n, scope) do

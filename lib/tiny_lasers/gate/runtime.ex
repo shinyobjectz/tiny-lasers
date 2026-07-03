@@ -765,11 +765,16 @@ defmodule TinyLasers.Gate.Runtime do
   defp ta_kind("Int32Array"), do: :i32
   defp ta_kind("Float32Array"), do: :f32
   defp ta_kind("Float64Array"), do: :f64
+  defp ta_kind("Uint8ClampedArray"), do: :u8c
+  defp ta_kind("BigInt64Array"), do: :i64
+  defp ta_kind("BigUint64Array"), do: :u64
 
   defp ta_size(k) when k in [:u8, :i8], do: 1
   defp ta_size(k) when k in [:u16, :i16], do: 2
   defp ta_size(k) when k in [:u32, :i32, :f32], do: 4
   defp ta_size(:f64), do: 8
+  defp ta_size(:u8c), do: 1
+  defp ta_size(k) when k in [:i64, :u64], do: 8
 
   defp ta_enc(:u8, v), do: <<Bitwise.band(ta_int(v), 0xFF)::unsigned-8>>
   defp ta_enc(:i8, v), do: <<ta_int(v)::signed-8>>
@@ -779,6 +784,9 @@ defmodule TinyLasers.Gate.Runtime do
   defp ta_enc(:i32, v), do: <<ta_int(v)::signed-little-32>>
   defp ta_enc(:f32, v), do: <<ta_float(v)::float-little-32>>
   defp ta_enc(:f64, v), do: <<ta_float(v)::float-little-64>>
+  defp ta_enc(:u8c, v), do: <<ta_clamp(v)::unsigned-8>>
+  defp ta_enc(:i64, v), do: <<ta_big(v)::signed-little-64>>
+  defp ta_enc(:u64, v), do: <<Bitwise.band(ta_big(v), 0xFFFFFFFFFFFFFFFF)::unsigned-little-64>>
 
   # JS typed-array element write COERCES (ToNumber then truncate/wrap) and never throws — NaN/Infinity/non-number
   # store as 0 in integer views (`new Uint8Array([NaN])[0] === 0`). Was `trunc(v)`, which crashed on :nan/:infinity.
@@ -786,6 +794,14 @@ defmodule TinyLasers.Gate.Runtime do
   defp ta_int(_), do: 0
   defp ta_float(v) when is_number(v), do: v / 1
   defp ta_float(_), do: 0.0
+  # Uint8ClampedArray store: round-half-to-even to nearest, then saturate to 0..255 (NaN => 0).
+  defp ta_clamp(v) when is_number(v), do: min(255, max(0, round(v)))
+  defp ta_clamp(_), do: 0
+  # BigInt64/BigUint64 store: a bigint value (or number coerced) as a 64-bit int.
+  defp ta_big({:bigint, n}), do: n
+  defp ta_big(v) when is_integer(v), do: v
+  defp ta_big(v) when is_number(v), do: trunc(v)
+  defp ta_big(_), do: 0
 
   defp ta_dec(:u8, <<v::unsigned-8>>), do: v * 1.0
   defp ta_dec(:i8, <<v::signed-8>>), do: v * 1.0
@@ -795,6 +811,9 @@ defmodule TinyLasers.Gate.Runtime do
   defp ta_dec(:i32, <<v::signed-little-32>>), do: v * 1.0
   defp ta_dec(:f32, <<v::float-little-32>>), do: v
   defp ta_dec(:f64, <<v::float-little-64>>), do: v
+  defp ta_dec(:u8c, <<v::unsigned-8>>), do: v * 1.0
+  defp ta_dec(:i64, <<v::signed-little-64>>), do: {:bigint, v}
+  defp ta_dec(:u64, <<v::unsigned-little-64>>), do: {:bigint, v}
   defp ta_dec(_, _), do: :nan
 
   defp ta_from_elems(kind, elems) do
@@ -2645,7 +2664,8 @@ defmodule TinyLasers.Gate.Runtime do
   end
   def construct({:global, ta}, args)
       when ta in ["Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array",
-                  "Int32Array", "Float32Array", "Float64Array"] do
+                  "Int32Array", "Float32Array", "Float64Array",
+                  "Uint8ClampedArray", "BigInt64Array", "BigUint64Array"] do
     kind = ta_kind(ta)
     sz = ta_size(kind)
     case args do
