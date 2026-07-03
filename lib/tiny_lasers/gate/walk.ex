@@ -779,7 +779,8 @@ defmodule TinyLasers.Gate.Walk do
   defp unary("delete", %{"type" => "MemberExpression"} = m, env) do
     obj = eval(m["object"], env)
     key = if m["computed"], do: eval(m["property"], env), else: key_of(m["property"])
-    Runtime.method({:global, "Reflect"}, "deleteProperty", [obj, key]); true
+    # odelete's verdict: false when the property is non-configurable (delete fails, sloppy mode), else true.
+    Runtime.method({:global, "Reflect"}, "deleteProperty", [obj, key]) != false
   end
   defp unary("delete", _a, _env), do: true
   defp unary(_op, a, env), do: eval(a, env)

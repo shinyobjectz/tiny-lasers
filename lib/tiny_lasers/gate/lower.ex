@@ -1500,13 +1500,13 @@ defmodule TinyLasers.Gate.Lower do
   defp expr(%{"type" => "UnaryExpression", "operator" => "void", "argument" => a}, scope),
     do: quote(do: (unquote(expr(a, scope)); :undefined))
 
-  # `delete o.k` / `delete o[k]` — remove the property (Reflect.deleteProperty, same route as Walk); always true.
+  # `delete o.k` / `delete o[k]` — remove the property (Reflect.deleteProperty, same route as Walk). Returns
+  # odelete's verdict: false when the property is non-configurable (delete fails, sloppy mode), else true.
   defp expr(%{"type" => "UnaryExpression", "operator" => "delete", "argument" => %{"type" => "MemberExpression"} = m}, scope) do
     kq = if m["computed"], do: expr(m["property"], scope), else: key_of(m["property"])
 
     quote do
-      unquote(@runtime).method({:global, "Reflect"}, "deleteProperty", [unquote(expr(m["object"], scope)), unquote(kq)])
-      true
+      unquote(@runtime).method({:global, "Reflect"}, "deleteProperty", [unquote(expr(m["object"], scope)), unquote(kq)]) != false
     end
   end
 

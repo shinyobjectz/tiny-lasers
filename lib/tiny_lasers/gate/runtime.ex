@@ -192,13 +192,24 @@ defmodule TinyLasers.Gate.Runtime do
   def oput({:cell, _} = c, k, v) do
     case accessor_setter(raw_prop(c, k)) do
       :none ->
-        # no OWN accessor — a setter on the PROTOTYPE chain still catches the write (class accessors live on
-        # the prototype), invoked with `this` = this instance; a prototype getter-only accessor makes the
-        # instance write a silent no-op (sloppy mode). Only walked when the cell has a prototype.
-        case proto_setter(c, key_str(k)) do
-          :none -> cell_put(c, k, v)
-          :readonly -> c
-          s -> invoke(s, c, [v]); c
+        cond do
+          # a non-writable OWN data property silently ignores the write (sloppy mode; strict TypeError is P3).
+          has_own(c, k) and not prop_writable?(c, k) ->
+            c
+
+          # a non-extensible object rejects NEW own properties (freeze/seal/preventExtensions).
+          not has_own(c, k) and not extensible?(c) ->
+            c
+
+          true ->
+            # no OWN accessor — a setter on the PROTOTYPE chain still catches the write (class accessors live on
+            # the prototype), invoked with `this` = this instance; a prototype getter-only accessor makes the
+            # instance write a silent no-op (sloppy mode). Only walked when the cell has a prototype.
+            case proto_setter(c, key_str(k)) do
+              :none -> cell_put(c, k, v)
+              :readonly -> c
+              s -> invoke(s, c, [v]); c
+            end
         end
 
       :readonly ->
@@ -237,6 +248,10 @@ defmodule TinyLasers.Gate.Runtime do
     Process.put(:gg_fnproto, Map.put(Process.get(:gg_fnproto, %{}), f, v))
     fnv
   end
+
+  # `.name`/`.length` are NON-writable: a plain assignment is a silent no-op (sloppy mode). defineProperty
+  # can still redefine them (configurable:true) — it writes the override via raw_put, not oput.
+  def oput({:fn, _} = fnv, k, _v) when k in ["name", "length"], do: fnv
 
   # functions are objects: `marked.parse = fn`, `marked.Lexer = ...`. Properties live in a per-function table
   # keyed by the closure identity (mutation is shared, like a cell). Returns the function. A property backed by
@@ -420,8 +435,8 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:fn, _} = fnv, "prototype"), do: fn_proto(fnv)
   # `.name`/`.length` are own configurable props: a user override (defineProperty/assignment, in gg_fnprops)
   # wins; otherwise the value is the metadata recorded at creation (fn_meta/set_fn_name).
-  def oget({:fn, f} = fnv, "name"), do: (case raw_prop(fnv, "name") do :undefined -> fn_name_meta(f); v -> v end)
-  def oget({:fn, f} = fnv, "length"), do: (case raw_prop(fnv, "length") do :undefined -> fn_len_meta(f) * 1.0; v -> v end)
+  def oget({:fn, f} = fnv, "name"), do: (case raw_prop(fnv, "name") do :undefined -> (if fn_deleted?(f, "name"), do: "", else: fn_name_meta(f)); v -> v end)
+  def oget({:fn, f} = fnv, "length"), do: (case raw_prop(fnv, "length") do :undefined -> (if fn_deleted?(f, "length"), do: 0.0, else: fn_len_meta(f) * 1.0); v -> v end)
   # a {:getter, g} marker on a function object (static class accessor via defineProperty) is invoked on read.
   def oget({:fn, f} = fnv, k) do
     case Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.get(key_str(k), :undefined) do
@@ -523,7 +538,8 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:global, "Number"}, "MAX_SAFE_INTEGER"), do: 9_007_199_254_740_991.0
   # the Object static methods callable as first-class values (esbuild aliases `var f = Object.defineProperty`).
   @obj_statics ~w(keys values entries getOwnPropertyNames getOwnPropertyDescriptor getOwnPropertyDescriptors
-                  assign create freeze defineProperty defineProperties getPrototypeOf setPrototypeOf fromEntries hasOwn)
+                  assign create freeze defineProperty defineProperties getPrototypeOf setPrototypeOf fromEntries hasOwn
+                  seal preventExtensions isExtensible isFrozen isSealed)
 
   # well-known symbols: stable, shared identities (Symbol.iterator etc. must compare equal across reads).
   def oget({:global, "Symbol"}, k) when k in ["iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag"],
@@ -597,7 +613,9 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "Ordered own-keys of a direct-term object."
   def okeys({keys, map}) when is_map(map), do: keys
-  def okeys({:cell, _} = c), do: elem(cell_read(c), 0)
+  # enumerable own keys only (Object.keys / for-in / spread / JSON): a property marked non-enumerable via
+  # defineProperty is skipped. Default (no overlay entry) is enumerable, so ordinary objects are unaffected.
+  def okeys({:cell, _} = c), do: (cell_read(c) |> elem(0) |> Enum.filter(&prop_enumerable?(c, &1)))
   def okeys({:globalobj}), do: Process.get(:gg_global, {[], %{}}) |> elem(0)
   # Proxy ownKeys trap → the enumerable keys (falls back to the target's).
   def okeys({:proxy, t, h}) do
@@ -632,6 +650,33 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   defp cell_read({:cell, id}), do: Process.get(:gg_cells, %{}) |> Map.get(id, {[], %{}})
+
+  # ── per-property attribute overlay (P1) ──────────────────────────────────────────────────────────────────
+  # A SPARSE map `:gg_pattr = %{{cell_id, keystr} => {writable, enumerable, configurable}}`. Absent ⇒ the
+  # default DATA property {true, true, true} — so a plain assignment records NOTHING and behaves exactly as
+  # before (zero regression). Only Object.defineProperty / freeze / seal write entries, so only explicitly
+  # attributed properties diverge from the default. Non-cell objects have no overlay (always default).
+  defp pattr_get({:cell, id}, k), do: Process.get(:gg_pattr, %{}) |> Map.get({id, key_str(k)}, {true, true, true})
+  defp pattr_get(_, _), do: {true, true, true}
+  defp pattr_put({:cell, id}, k, {_w, _e, _c} = a), do: Process.put(:gg_pattr, Map.put(Process.get(:gg_pattr, %{}), {id, key_str(k)}, a))
+  defp pattr_put(_, _, _), do: :ok
+  defp pattr_del({:cell, id}, k), do: Process.put(:gg_pattr, Map.delete(Process.get(:gg_pattr, %{}), {id, key_str(k)}))
+  defp pattr_del(_, _), do: :ok
+
+  defp prop_writable?(o, k), do: elem(pattr_get(o, k), 0)
+  defp prop_enumerable?(o, k), do: elem(pattr_get(o, k), 1)
+  defp prop_configurable?(o, k), do: elem(pattr_get(o, k), 2)
+
+  # extensibility: a set of non-extensible cell ids (Object.preventExtensions/seal/freeze). A non-extensible
+  # object rejects NEW own properties (existing writes still apply).
+  defp mark_nonextensible({:cell, id}), do: Process.put(:gg_nonext, MapSet.put(Process.get(:gg_nonext, MapSet.new()), id))
+  defp mark_nonextensible(_), do: :ok
+  defp extensible?({:cell, id}), do: not MapSet.member?(Process.get(:gg_nonext, MapSet.new()), id)
+  defp extensible?(_), do: false
+
+  # ALL own string keys of a cell (getOwnPropertyNames — includes non-enumerable); okeys is enumerable-only.
+  defp own_keys_all({:cell, _} = c), do: elem(cell_read(c), 0)
+  defp own_keys_all(o), do: okeys(o)
 
   @doc "In-place property write on a cell. Returns the SAME handle (mutation is shared)."
   def cell_put({:cell, id} = c, k, v) do
@@ -1351,7 +1396,7 @@ defmodule TinyLasers.Gate.Runtime do
   def method({:cell, _} = c, "hasOwnProperty", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
   # cell own props are enumerable in F2 (no per-property non-enumerable flag for cells yet) — used by test262's
   # propertyHelper `Function.prototype.call.bind(Object.prototype.propertyIsEnumerable)`.
-  def method({:cell, _} = c, "propertyIsEnumerable", [k | _]), do: Map.has_key?(cell_read(c) |> elem(1), key_str(k))
+  def method({:cell, _} = c, "propertyIsEnumerable", [k | _]), do: prop_is_enum(c, k)
   # function objects: hasOwnProperty / propertyIsEnumerable. `.name`/`.length` are own but NON-enumerable.
   def method({:fn, _} = f, "hasOwnProperty", [k | _]), do: has_own(f, k)
   def method({:fn, _} = f, "propertyIsEnumerable", [k | _]), do: prop_is_enum(f, k)
@@ -1359,7 +1404,7 @@ defmodule TinyLasers.Gate.Runtime do
   # is `k` an ENUMERABLE own property of `o`? Function `name`/`length`/`prototype` are own but non-enumerable;
   # for other object kinds F2 has no per-property enumerable flag yet, so any own property is enumerable.
   defp prop_is_enum({:fn, _} = o, k), do: (ks = key_str(k); has_own(o, ks) and ks not in ["name", "length", "prototype"])
-  defp prop_is_enum(o, k), do: has_own(o, key_str(k))
+  defp prop_is_enum(o, k), do: (ks = key_str(k); has_own(o, ks) and prop_enumerable?(o, ks))
 
   def method({:cell, id} = c, name, args) do
     coll = Process.get({:gg_cellcoll, id})
@@ -1486,7 +1531,7 @@ defmodule TinyLasers.Gate.Runtime do
   defp object_static("keys", [o | _]), do: avec(okeys(o))
   defp object_static("values", [o | _]), do: avec(Enum.map(okeys(o), &oget(o, &1)))
   defp object_static("entries", [o | _]), do: avec(Enum.map(okeys(o), fn k -> avec([k, oget(o, k)]) end))
-  defp object_static("getOwnPropertyNames", [o | _]), do: avec(okeys(o))
+  defp object_static("getOwnPropertyNames", [o | _]), do: avec(own_keys_all(o))
   defp object_static("assign", [target | sources]), do: Enum.reduce(sources, target, fn s, t -> Enum.reduce(okeys(s), t, fn k, acc -> oput(acc, k, oget(s, k)) end) end)
   # Object.create(proto[, props]): a fresh object whose prototype chain is `proto` (Babel `_inherits`), with
   # optional property descriptors (rollup: `Object.create(null, { [EntitiesKey]: { value: new Set() } })`).
@@ -1501,7 +1546,28 @@ defmodule TinyLasers.Gate.Runtime do
       _ -> c
     end
   end
+  # freeze: every own property becomes non-writable + non-configurable (enumerability kept), and the object is
+  # made non-extensible. seal: non-configurable only (values stay writable). preventExtensions: just the flag.
+  defp object_static("freeze", [{:cell, _} = o | _]) do
+    Enum.each(own_keys_all(o), fn k -> {_w, e, _c} = pattr_get(o, k); pattr_put(o, k, {false, e, false}) end)
+    mark_nonextensible(o)
+    o
+  end
   defp object_static("freeze", [o | _]), do: o
+  defp object_static("seal", [{:cell, _} = o | _]) do
+    Enum.each(own_keys_all(o), fn k -> {w, e, _c} = pattr_get(o, k); pattr_put(o, k, {w, e, false}) end)
+    mark_nonextensible(o)
+    o
+  end
+  defp object_static("seal", [o | _]), do: o
+  defp object_static("preventExtensions", [o | _]), do: (mark_nonextensible(o); o)
+  defp object_static("isExtensible", [o | _]), do: extensible?(o)
+  defp object_static("isFrozen", [{:cell, _} = o | _]),
+    do: not extensible?(o) and Enum.all?(own_keys_all(o), fn k -> {w, _e, c} = pattr_get(o, k); not w and not c end)
+  defp object_static("isFrozen", [_ | _]), do: true
+  defp object_static("isSealed", [{:cell, _} = o | _]),
+    do: not extensible?(o) and Enum.all?(own_keys_all(o), fn k -> {_w, _e, c} = pattr_get(o, k); not c end)
+  defp object_static("isSealed", [_ | _]), do: true
   # defineProperty: set `value` if the descriptor carries one (Babel `_createClass` method attach); a
   # value-less descriptor (`{writable:false}` on `Ctor.prototype`) must NOT clobber the existing property. A
   # get/set descriptor installs an `{:accessor, get, set}`, MERGING with an existing accessor (separate
@@ -1509,10 +1575,23 @@ defmodule TinyLasers.Gate.Runtime do
   # itself doesn't re-enter the write path.
   defp object_static("defineProperty", [o, k, desc | _]) do
     ks = to_str(k)
+    existed = has_own(o, ks)
+    # spec: for a NEW property an unspecified attribute defaults to false; redefining keeps current.
+    {cw, ce, cc} = if existed, do: pattr_get(o, ks), else: {false, false, false}
+    w = if has_own(desc, "writable"), do: truthy(oget(desc, "writable")), else: cw
+    e = if has_own(desc, "enumerable"), do: truthy(oget(desc, "enumerable")), else: ce
+    c = if has_own(desc, "configurable"), do: truthy(oget(desc, "configurable")), else: cc
 
     cond do
       has_own(desc, "value") ->
-        oput(o, ks, oget(desc, "value"))
+        # fn name/length: oput blocks plain writes (non-writable), but defineProperty may redefine them
+        # (configurable) — install the override raw. Everything else keeps the oput route (setters, cells).
+        case o do
+          {:fn, _} when ks in ["name", "length"] -> raw_put(o, ks, oget(desc, "value"))
+          _ -> oput(o, ks, oget(desc, "value"))
+        end
+        pattr_put(o, ks, {w, e, c})
+        o
 
       has_own(desc, "get") or has_own(desc, "set") ->
         {cg, cs} =
@@ -1525,6 +1604,8 @@ defmodule TinyLasers.Gate.Runtime do
         ng = if has_own(desc, "get"), do: oget(desc, "get"), else: cg
         ns = if has_own(desc, "set"), do: oget(desc, "set"), else: cs
         raw_put(o, ks, {:accessor, ng, ns})
+        pattr_put(o, ks, {w, e, c})
+        o
 
       true ->
         o
@@ -1541,21 +1622,47 @@ defmodule TinyLasers.Gate.Runtime do
   defp reflect_static("set", [t, k, v | _]), do: (oput(t, k, v); true)
   defp reflect_static("has", [t, k | _]), do: has_own(t, k)
   defp reflect_static("ownKeys", [t | _]), do: avec(okeys(t))
-  defp reflect_static("deleteProperty", [t, k | _]), do: (odelete(t, k); true)
+  defp reflect_static("deleteProperty", [t, k | _]), do: odelete(t, k)
   defp reflect_static("getPrototypeOf", _), do: :null
   defp reflect_static("defineProperty", [t, k, d | _]), do: (object_static("defineProperty", [t, k, d]); true)
   defp reflect_static("construct", [ctor, a | _]), do: construct(ctor, arr_to_list(a))
   defp reflect_static("apply", [f, this, a | _]), do: invoke(f, this, arr_to_list(a))
   defp reflect_static(_, _), do: :undefined
 
-  # delete a property from a cell (Reflect.deleteProperty / `delete o.k`).
+  # delete a property from a cell (Reflect.deleteProperty / `delete o.k`). A non-configurable own property
+  # cannot be deleted: the delete fails and returns false (sloppy mode; strict TypeError is P3). Otherwise the
+  # property (and its attribute overlay entry) is removed and true is returned.
   defp odelete({:cell, id} = c, k) do
-    {keys, map} = cell_read(c)
     ks = key_str(k)
-    Process.put(:gg_cells, Map.put(Process.get(:gg_cells, %{}), id, {List.delete(keys, ks), Map.delete(map, ks)}))
-    :undefined
+
+    cond do
+      has_own(c, ks) and not prop_configurable?(c, ks) ->
+        false
+
+      true ->
+        {keys, map} = cell_read(c)
+        Process.put(:gg_cells, Map.put(Process.get(:gg_cells, %{}), id, {List.delete(keys, ks), Map.delete(map, ks)}))
+        pattr_del(c, ks)
+        true
+    end
   end
-  defp odelete(_, _), do: :undefined
+  # function objects: name/length are configurable — delete marks a tombstone (has_own goes false; reads fall
+  # back to the Function.prototype defaults). Other fn props are removed from the per-function table.
+  defp odelete({:fn, f} = fnv, k) do
+    ks = key_str(k)
+
+    if ks in ["name", "length"] do
+      Process.put(:gg_fndel, Map.update(Process.get(:gg_fndel, %{}), f, MapSet.new([ks]), &MapSet.put(&1, ks)))
+      true
+    else
+      {keys, map} = Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}})
+      Process.put(:gg_fnprops, Map.put(Process.get(:gg_fnprops, %{}), f, {List.delete(keys, ks), Map.delete(map, ks)}))
+      _ = fnv
+      true
+    end
+  end
+
+  defp odelete(_, _), do: true
 
   defp object_static("getPrototypeOf", _), do: :undefined
   defp object_static("setPrototypeOf", [o | _]), do: o
@@ -1578,15 +1685,24 @@ defmodule TinyLasers.Gate.Runtime do
 
   defp object_static("getOwnPropertyDescriptor", [o, k | _]) do
     ks = to_str(k)
-    if ks in Enum.map(okeys(o), &to_str/1),
-      do: cell_new([{"value", oget(o, ks)}, {"writable", true}, {"enumerable", true}, {"configurable", true}]),
-      else: :undefined
+
+    if ks in Enum.map(own_keys_all(o), &to_str/1) do
+      {w, e, c} = pattr_get(o, ks)
+
+      case raw_prop(o, ks) do
+        {:accessor, g, s} -> cell_new([{"get", g}, {"set", s}, {"enumerable", e}, {"configurable", c}])
+        {:getter, g} -> cell_new([{"get", g}, {"set", :undefined}, {"enumerable", e}, {"configurable", c}])
+        _ -> cell_new([{"value", oget(o, ks)}, {"writable", w}, {"enumerable", e}, {"configurable", c}])
+      end
+    else
+      :undefined
+    end
   end
   # getOwnPropertyDescriptors: { key => descriptor } for every own key — svelte's AST-node merge copies a
   # node's whole shape with this (`for (k in getOwnPropertyDescriptors(node)) defineProperty(clone, k, desc)`);
   # missing it silently dropped every field but the patched one, reducing FunctionDeclaration to just {id}.
   defp object_static("getOwnPropertyDescriptors", [o | _]) do
-    cell_new(Enum.map(okeys(o), fn k -> {to_str(k), object_static("getOwnPropertyDescriptor", [o, k])} end))
+    cell_new(Enum.map(own_keys_all(o), fn k -> {to_str(k), object_static("getOwnPropertyDescriptor", [o, k])} end))
   end
   # Object.hasOwn(o, k) — svelte gates EVERY reactive read/assign transform on
   # `Object.hasOwn(state.transform, name) ? … : null`; returning undefined made the ternary pick null, so no
@@ -2013,6 +2129,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
   def set_fn_name(v, _name), do: v
 
+  defp fn_deleted?(f, k), do: Process.get(:gg_fndel, %{}) |> Map.get(f, MapSet.new()) |> MapSet.member?(k)
   defp fn_name_meta(f), do: (case Process.get(:gg_fnmeta, %{}) |> Map.get(f) do {n, _} -> n; _ -> "" end)
   defp fn_len_meta(f), do: (case Process.get(:gg_fnmeta, %{}) |> Map.get(f) do {_, l} -> l; _ -> 0 end)
 
@@ -2945,7 +3062,9 @@ defmodule TinyLasers.Gate.Runtime do
     key = key_str(k)
     case o do
       {:cell, _} -> Map.has_key?(cell_read(o) |> elem(1), key)
-      {:fn, f} -> key in ["name", "length"] or (Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.has_key?(key))
+      {:fn, f} ->
+        (Process.get(:gg_fnprops, %{}) |> Map.get(f, {[], %{}}) |> elem(1) |> Map.has_key?(key)) or
+          (key in ["name", "length"] and not fn_deleted?(f, key))
       {keys, map} when is_map(map) -> Map.has_key?(map, key)
       {:globalobj} -> Process.get(:gg_global, {[], %{}}) |> elem(1) |> Map.has_key?(key)
       {:arr, _} = a -> len = length(al(a)); key == "length" or match?({n, ""} when n >= 0 and n < len, Integer.parse(key))
@@ -3126,7 +3245,8 @@ defmodule TinyLasers.Gate.Runtime do
 
   @doc "for-in enumeration keys: object own-keys, array index strings, or none."
   def enum_keys({keys, map}) when is_map(map), do: keys
-  def enum_keys({:cell, _} = c), do: elem(cell_read(c), 0)
+  # for-in enumerates ENUMERABLE own keys (a defineProperty non-enumerable prop is skipped, like Object.keys).
+  def enum_keys({:cell, _} = c), do: (cell_read(c) |> elem(0) |> Enum.filter(&prop_enumerable?(c, &1)))
   def enum_keys({t, _} = a) when t in [:arr, :al], do: (l = al(a); if l == [], do: [], else: Enum.map(0..(length(l) - 1)//1, &Integer.to_string/1))
   def enum_keys(_), do: []
 
