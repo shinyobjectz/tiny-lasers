@@ -110,6 +110,22 @@ defmodule TinyLasers.Gate.ExecProdTest do
     assert ModuleCache.stats().entries == before
   end
 
+  test "graceful drain: sheds new admissions and waits for in-flight to clear", %{t: t} do
+    # hold an in-flight slot open, then drain concurrently — it must wait, then complete when we release.
+    assert :ok = Admission.admit(t)
+    assert Admission.global_inflight() >= 1
+
+    task = Task.async(fn -> Exec.drain(5_000) end)
+    Process.sleep(50)
+    # during the drain, new invocations are shed (admission refused)
+    assert %{result: {:rejected, :atom_pressure}} = Exec.invoke(t, "print('x');")
+    refute Task.yield(task, 0), "drain returned before in-flight cleared"
+
+    Admission.release(t)
+    assert Task.await(task, 5_000) == :drained
+    Admission.set_shedding(false)
+  end
+
   test "health snapshot reports live tier state" do
     h = Exec.health()
     assert is_float(h.atom_pressure)

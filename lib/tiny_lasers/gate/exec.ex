@@ -73,6 +73,25 @@ defmodule TinyLasers.Gate.Exec do
     end)
   end
 
+  @doc """
+  Gracefully drain for a node recycle: raise admission shedding (no NEW invocations admitted) and wait for the
+  in-flight count to reach zero, up to `timeout_ms`. Returns `:drained` or `:timeout`. Wire this as the
+  AtomWatchdog `recycle` callback in production: `fn -> Exec.drain(); System.stop() end` — so a restart that
+  reclaims the atom table never hard-kills a request mid-flight.
+  """
+  def drain(timeout_ms \\ 30_000) do
+    Admission.set_shedding(true)
+    wait_drain(System.monotonic_time(:millisecond) + timeout_ms)
+  end
+
+  defp wait_drain(deadline) do
+    cond do
+      safe(fn -> Admission.global_inflight() end, 0) <= 0 -> :drained
+      System.monotonic_time(:millisecond) >= deadline -> :timeout
+      true -> Process.sleep(25); wait_drain(deadline)
+    end
+  end
+
   @doc "Snapshot of node health for observability / readiness probes."
   def health do
     %{
