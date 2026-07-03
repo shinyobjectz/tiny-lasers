@@ -266,6 +266,7 @@ defmodule TinyLasers.Gate.Runtime do
 
   # arrays can carry NAMED properties (JS arrays are objects): `this.tokens.links = {}` — stored in a props
   # map alongside the elements. Numeric keys write elements; named keys write props.
+  def oput({:al, _}, k, _v), do: immut_arr_violation!("oput #{key_str(k)}")
   def oput({:arr, _} = a, k, v), do: arr_put(a, k, v)
   # property write on a primitive is a silent no-op (JS sloppy mode) — return the RECEIVER unchanged so a
   # root-identifier rebind doesn't replace a number/string/undefined with an empty object.
@@ -275,6 +276,7 @@ defmodule TinyLasers.Gate.Runtime do
   def oput(not_obj, _k, _v), do: not_obj
 
   # write to an array IN PLACE: numeric key → element slot; named key → the props map. Returns the same handle.
+  defp arr_put({:al, _}, k, _v), do: immut_arr_violation!("arr_put #{key_str(k)}")
   defp arr_put({:arr, _} = a, k, v) do
     list = al(a)
     props = ap(a)
@@ -455,7 +457,7 @@ defmodule TinyLasers.Gate.Runtime do
   def oget({:abuf, _, blen}, "byteLength"), do: blen * 1.0
   def oget({:abuf, _, _}, _), do: :undefined
 
-  def oget({:arr, _} = a, k) do
+  def oget({t, _} = a, k) when t in [:arr, :al] do
     cond do
       k == "length" -> length(al(a)) * 1.0
       (idx = arr_index(k)) != nil -> Enum.at(al(a), idx, :undefined)
@@ -631,6 +633,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   @doc "Functional index/key write. Arrays grow to fit; objects add the key. Returns a NEW term."
+  def oput_idx({:al, _}, i, _v), do: immut_arr_violation!("oput_idx #{inspect(i)}")
   def oput_idx({:arr, _} = a, i, v), do: arr_put(a, i, v)
   # a cell member write goes through the accessor-aware `oput` (Lower's `o.x = v` rebind lowers to oput_idx —
   # it must invoke a setter, not raw-store past it).
@@ -657,11 +660,24 @@ defmodule TinyLasers.Gate.Runtime do
     {:arr, id}
   end
 
+  @doc """
+  Allocate an IMMUTABLE array literal — a plain `{:al, list}` direct term with NO `{:gg_vec}` handle, so the
+  BEAM GC reclaims it when unreachable (the object-store-leak fix, Lever 2). Lower emits this (instead of the
+  mutable `alit/1`) ONLY where a conservative use-whitelist proves the binding never escapes and is never
+  mutated (see Lower's `immut_arr_vars/1`).
+  """
+  def alit_i(list) when is_list(list), do: {:al, list}
+
+  # A mutating op reached an {:al} immutable array — means Lower's escape/mutation analysis was UNSOUND. Fail
+  # LOUD (never silently corrupt): a differential run vs Walk turns this into a visible divergence/crash.
+  defp immut_arr_violation!(op),
+    do: raise("F2 immutable-array (escape-analysis) bug: mutating op `#{op}` reached an {:al} array")
+
   @doc "A rest parameter's array: the args from index `i` onward. (Keeps Enum.drop out of emitted guest code.)"
   def args_rest(args, i) when is_list(args), do: avec(Enum.drop(args, i))
 
   @doc "Public accessor: a guest array's element list (for host capability bridges reading guest arrays)."
-  def arr_to_list({:arr, _} = a), do: al(a)
+  def arr_to_list({t, _} = a) when t in [:arr, :al], do: al(a)
   def arr_to_list(_), do: []
 
   defp bytes_bin({:bytes, b}), do: b
@@ -806,7 +822,13 @@ defmodule TinyLasers.Gate.Runtime do
   end
 
   defp al({:arr, id}), do: Process.get({:gg_vec, id}, {[], %{}}) |> elem(0)
+  # {:al, list} — an IMMUTABLE array: a plain direct BEAM term (no {:gg_vec} handle), so BEAM's GC reclaims it
+  # when unreachable. Lower emits it only for array literals a conservative escape/mutation analysis proves are
+  # non-escaping AND never mutated (see f2-object-store-leak) — so ONLY the read paths below are ever reached;
+  # every mutating op raises (a loud analysis-bug signal, never silent corruption).
+  defp al({:al, list}) when is_list(list), do: list
   defp ap({:arr, id}), do: Process.get({:gg_vec, id}, {[], %{}}) |> elem(1)
+  defp ap({:al, _}), do: %{}
   defp aset({:arr, id} = a, list, props), do: (Process.put({:gg_vec, id}, {list, props}); a)
   defp aset_l({:arr, _} = a, list), do: aset(a, list, ap(a))
 
@@ -842,7 +864,7 @@ defmodule TinyLasers.Gate.Runtime do
   def spread_args(parts), do: Enum.flat_map(parts, fn {:spread, v} -> iter(v); {:one, v} -> [v] end)
 
   @doc "Array rest binding `[a, ...rest] = arr` — the elements from index `from` onward as a new array."
-  def arest({:arr, _} = a, from), do: avec(Enum.drop(al(a), from))
+  def arest({t, _} = a, from) when t in [:arr, :al], do: avec(Enum.drop(al(a), from))
   def arest(_other, _from), do: avec([])
 
   @doc "Object rest binding `{a, ...rest} = o` — a new object of `o`'s own keys except the destructured ones."
@@ -1090,12 +1112,12 @@ defmodule TinyLasers.Gate.Runtime do
   end
   # a computed-member CALL `arr[i](args)` / `ta[i](args)` — the callee is the element (a function), invoked
   # with `this` = the container (rollup: `nodeConverters[nodeType](position, buffer)`).
-  def method({:arr, _} = a, k, args) when is_number(k), do: invoke(oget(a, k), a, args)
+  def method({t, _} = a, k, args) when t in [:arr, :al] and is_number(k), do: invoke(oget(a, k), a, args)
   def method({:ta, _, _, _, _} = ta, k, args) when is_number(k), do: invoke(oget(ta, k), ta, args)
 
   # ── all array methods on a mutable reference: mutating ops write the table in place (aliases share); pure
   # ops return a NEW array. ──
-  def method({:arr, _} = a, name, args) do
+  def method({t, _} = a, name, args) when t in [:arr, :al] do
     list = al(a)
     a0 = List.first(args)
     arr_method(a, list, name, a0, args)
@@ -1523,7 +1545,7 @@ defmodule TinyLasers.Gate.Runtime do
   defp object_static(_, _), do: :undefined
 
   defp array_static("isArray", [{:cell, id} | _]), do: Process.get({:gg_cellarr, id}) != nil
-  defp array_static("isArray", [x | _]), do: match?({:arr, _}, x)
+  defp array_static("isArray", [x | _]), do: match?({:arr, _}, x) or match?({:al, _}, x)
   defp array_static("from", [x | rest]) do
     # any iterable — Map yields [k,v] pairs, Set its members (rollup's getResolveStaticDependencyPromises is
     # Array.from(sourcesWithAttributes, async ([source, attributes]) => …) — a MAP with a mapper).
@@ -1646,7 +1668,7 @@ defmodule TinyLasers.Gate.Runtime do
   defp json_enc(:undefined), do: "null"
   defp json_enc(:null), do: "null"
   defp json_enc(s) when is_binary(s), do: json_quote(s)
-  defp json_enc({:arr, _} = a), do: "[" <> (al(a) |> Enum.map(&json_enc/1) |> Enum.join(",")) <> "]"
+  defp json_enc({t, _} = a) when t in [:arr, :al], do: "[" <> (al(a) |> Enum.map(&json_enc/1) |> Enum.join(",")) <> "]"
   defp json_enc({:fn, _}), do: "null"
   defp json_enc(o) do
     keys = okeys(o)
@@ -1720,7 +1742,7 @@ defmodule TinyLasers.Gate.Runtime do
   end
   # array/object coercion: ToPrimitive → string → number (`Number([]) === 0`, `Number([1]) === 1`,
   # `Number([1,2])` is NaN, `Number({})` is NaN).
-  def to_number({:arr, _} = a), do: to_number(to_str(a))
+  def to_number({t, _} = a) when t in [:arr, :al], do: to_number(to_str(a))
   def to_number({:cell, _} = o), do: to_number(to_primitive(o))
   def to_number(_), do: :nan
 
@@ -2664,7 +2686,7 @@ defmodule TinyLasers.Gate.Runtime do
   def to_str({:obj, _}), do: "[object Object]"
   def to_str({:fun, _}), do: "function"
   def to_str({:host, _}), do: "function"
-  def to_str({:arr, _} = a), do: al(a) |> Enum.map(fn v -> if v in [:undefined, :null], do: "", else: to_str(v) end) |> Enum.join(",")
+  def to_str({t, _} = a) when t in [:arr, :al], do: al(a) |> Enum.map(fn v -> if v in [:undefined, :null], do: "", else: to_str(v) end) |> Enum.join(",")
   def to_str({:regex, _, src, flags}), do: "/" <> src <> "/" <> flags
   def to_str({:fn, _}), do: "function"
   def to_str({:date, _} = d), do: method(d, "toString", [])
@@ -2800,7 +2822,7 @@ defmodule TinyLasers.Gate.Runtime do
   def throw_val(v), do: throw({:gg_throw, v})
 
   @doc "for-of iteration items: array elements, or a string's chars (1-char binaries)."
-  def iter({:arr, _} = a), do: al(a)
+  def iter({t, _} = a) when t in [:arr, :al], do: al(a)
   # a cell backed by a real array (class extends Array) iterates its elements (for-of / spread over a NodeList).
   def iter({:cell, id}) do
     case Process.get({:gg_cellarr, id}) do
@@ -2820,7 +2842,7 @@ defmodule TinyLasers.Gate.Runtime do
   # the chunk graph closes over dependencies). A snapshot iterator silently truncates the walk, so for-of in
   # both lanes steps through these cursors, re-reading the collection each step. Other iterables (strings,
   # typed arrays) keep snapshot semantics.
-  def iter_start({:arr, _} = a), do: {:gg_acur, a, 0}
+  def iter_start({t, _} = a) when t in [:arr, :al], do: {:gg_acur, a, 0}
   def iter_start({:set, id}), do: {:gg_scur, id, 0}
   def iter_start({:map, id}), do: {:gg_mcur, id, 0}
   def iter_start(other), do: {:gg_lcur, iter(other)}
@@ -2853,7 +2875,7 @@ defmodule TinyLasers.Gate.Runtime do
   @doc "for-in enumeration keys: object own-keys, array index strings, or none."
   def enum_keys({keys, map}) when is_map(map), do: keys
   def enum_keys({:cell, _} = c), do: elem(cell_read(c), 0)
-  def enum_keys({:arr, _} = a), do: (l = al(a); if l == [], do: [], else: Enum.map(0..(length(l) - 1)//1, &Integer.to_string/1))
+  def enum_keys({t, _} = a) when t in [:arr, :al], do: (l = al(a); if l == [], do: [], else: Enum.map(0..(length(l) - 1)//1, &Integer.to_string/1))
   def enum_keys(_), do: []
 
   @doc "`typeof` — a fixed set of result binaries (never guest-controlled atoms)."

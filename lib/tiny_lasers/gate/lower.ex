@@ -31,7 +31,7 @@ defmodule TinyLasers.Gate.Lower do
   def program(%{"type" => "Program", "body" => body}, granted) do
     vars = collect_vars(body) |> Enum.uniq()
     boxed = boxed_set(vars, body)
-    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}}
+    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}, immut_arrs: immut_arr_vars(body)}
     {stmts, _scope} = stmts(body, scope0)
     # top-level `this` IS the global object; pre-bind hoisted vars (a boxed var gets a box — JS var hoisting).
     prelude =
@@ -275,7 +275,10 @@ defmodule TinyLasers.Gate.Lower do
       Enum.reduce(ds, {[], scope}, fn d, {acc, s} ->
         init = d["init"]
         s2 = Enum.reduce(pattern_names(d["id"]), s, &%{&2 | locals: MapSet.put(&2.locals, &1)})
-        vq = if init, do: expr(init, s2), else: :undefined
+        # object-store-leak Lever 2: hint the array-literal lowering to emit an immutable {:al} term when this
+        # binding's every use is proven read-only + non-escaping.
+        s_init = if immut_arr_ok?(d["id"], init, s2), do: Map.put(s2, :immut_hint, true), else: s2
+        vq = if init, do: expr(init, s_init), else: :undefined
 
         q =
           case d["id"] do
@@ -1062,8 +1065,12 @@ defmodule TinyLasers.Gate.Lower do
       length(els) > 48 -> fold_array(els, scope)
 
       true ->
-        elq = Enum.map(els, fn e -> if e, do: expr(e, scope), else: :undefined end)
-        quote(do: unquote(@runtime).alit(unquote(elq)))
+        # the immutable hint applies ONLY to THIS array (the direct init of a proven-safe binding); nested
+        # array literals inside the elements must NOT inherit it (their independent safety isn't established).
+        inner = Map.put(scope, :immut_hint, false)
+        elq = Enum.map(els, fn e -> if e, do: expr(e, inner), else: :undefined end)
+        ctor = if scope[:immut_hint], do: :alit_i, else: :alit
+        quote(do: unquote(@runtime).unquote(ctor)(unquote(elq)))
     end
   end
 
@@ -2108,6 +2115,117 @@ defmodule TinyLasers.Gate.Lower do
 
     decls |> Enum.filter(&MapSet.member?(boxable, &1)) |> MapSet.new()
   end
+
+  # ── IMMUTABLE-ARRAY escape analysis (object-store-leak Lever 2). A `var x = [<small non-spread literal>]`
+  # whose EVERY use is read-only-and-non-escaping can be lowered to a direct `{:al, list}` term (Runtime.alit_i)
+  # that the BEAM GC reclaims, instead of a leaking `{:gg_vec}` handle. CONSERVATIVE by construction: a name is
+  # eligible only if it appears EXCLUSIVELY in whitelisted positions; ANY other appearance (call arg, return,
+  # reassignment, member/index write, method call, `.prop` read, capture, ===, array/object element, …) marks it
+  # unsafe. Whitelisted: `x[e]` index read, `x.length`, `for(..of/in x)`, `...x` spread-read. Soundness is
+  # also runtime-enforced — a mutating op on an {:al} array RAISES (immut_arr_violation!), so any analysis miss
+  # surfaces as a loud differential divergence, never silent corruption. ──
+  defp immut_arr_vars(body) do
+    cands = array_literal_decls(body, MapSet.new())
+
+    if MapSet.size(cands) == 0 do
+      MapSet.new()
+    else
+      MapSet.difference(cands, collect_arr_unsafe(body, MapSet.new()))
+    end
+  end
+
+  # candidate names: `= [<=48 elements, no SpreadElement]` (exactly the inline `alit` path in expr/2).
+  defp array_literal_decls(%{"type" => "VariableDeclarator", "id" => %{"type" => "Identifier", "name" => n}, "init" => %{"type" => "ArrayExpression", "elements" => els}}, acc) do
+    if length(els) <= 48 and not Enum.any?(els, &(is_map(&1) and &1["type"] == "SpreadElement")),
+      do: MapSet.put(acc, n),
+      else: acc
+  end
+
+  defp array_literal_decls(m, acc) when is_map(m), do: Enum.reduce(Map.values(m), acc, &array_literal_decls/2)
+  defp array_literal_decls(l, acc) when is_list(l), do: Enum.reduce(l, acc, &array_literal_decls/2)
+  defp array_literal_decls(_, acc), do: acc
+
+  defp immut_arr_ok?(id, init, scope) do
+    set = scope[:immut_arrs]
+
+    set != nil and match?(%{"type" => "Identifier"}, id) and is_map(init) and
+      init["type"] == "ArrayExpression" and
+      not Enum.any?(init["elements"] || [], &(is_map(&1) and &1["type"] == "SpreadElement")) and
+      length(init["elements"] || []) <= 48 and MapSet.member?(set, id["name"])
+  end
+
+  # walk the AST accumulating names used in ANY non-whitelisted (i.e. escaping or mutating) position.
+  defp collect_arr_unsafe(%{"type" => "Identifier", "name" => n}, acc), do: MapSet.put(acc, n)
+
+  # a VariableDeclarator's own `id` is a DEFINITION, not a use — skip it (an Identifier id); walk the init.
+  defp collect_arr_unsafe(%{"type" => "VariableDeclarator", "id" => id, "init" => init}, acc) do
+    acc = if match?(%{"type" => "Identifier"}, id), do: acc, else: collect_arr_unsafe(id, acc)
+    collect_arr_unsafe(init, acc)
+  end
+
+  defp collect_arr_unsafe(%{"type" => "MemberExpression", "object" => obj, "property" => prop, "computed" => computed}, acc) do
+    cond do
+      # x.length — safe leaf read for an identifier object
+      computed == false and match?(%{"type" => "Identifier", "name" => "length"}, prop) -> arr_skip_ident(obj, acc)
+      # x[e] — index read: safe for the identifier object; the index expr is a normal use
+      computed == true -> collect_arr_unsafe(prop, arr_skip_ident(obj, acc))
+      # x.<named> — a named-prop / method-as-value read → escapes x
+      true -> arr_mark_ident(obj, acc)
+    end
+  end
+
+  # method / computed-method CALL on an identifier receiver → the receiver may be mutated → unsafe.
+  defp collect_arr_unsafe(%{"type" => "CallExpression", "callee" => callee, "arguments" => args}, acc) do
+    acc =
+      case callee do
+        %{"type" => "MemberExpression", "object" => %{"type" => "Identifier", "name" => x}, "computed" => c, "property" => p} ->
+          acc = MapSet.put(acc, x)
+          if c, do: collect_arr_unsafe(p, acc), else: acc
+
+        _ ->
+          collect_arr_unsafe(callee, acc)
+      end
+
+    collect_arr_unsafe(args, acc)
+  end
+
+  # assignment / update to an identifier or its member → mutation/reassignment → unsafe.
+  defp collect_arr_unsafe(%{"type" => t, "left" => left, "right" => right}, acc) when t in ["AssignmentExpression"] do
+    collect_arr_unsafe(right, arr_write_target(left, acc))
+  end
+
+  defp collect_arr_unsafe(%{"type" => "UpdateExpression", "argument" => arg}, acc), do: arr_write_target(arg, acc)
+
+  # `for (.. of/in x)` — x as the iterable is a safe read.
+  defp collect_arr_unsafe(%{"type" => t, "right" => right, "left" => left, "body" => b}, acc)
+       when t in ["ForOfStatement", "ForInStatement"] do
+    collect_arr_unsafe(b, collect_arr_unsafe(left, arr_skip_ident(right, acc)))
+  end
+
+  # `...x` — a spread READ (into an array/call); safe for an identifier argument.
+  defp collect_arr_unsafe(%{"type" => "SpreadElement", "argument" => arg}, acc), do: arr_skip_ident(arg, acc)
+
+  defp collect_arr_unsafe(m, acc) when is_map(m), do: Enum.reduce(Map.values(m), acc, &collect_arr_unsafe/2)
+  defp collect_arr_unsafe(l, acc) when is_list(l), do: Enum.reduce(l, acc, &collect_arr_unsafe/2)
+  defp collect_arr_unsafe(_, acc), do: acc
+
+  # a write target: `x =` / `x++` / `x[e]=` / `x.p=` all make x unsafe (recurse the computed index expr).
+  defp arr_write_target(%{"type" => "Identifier", "name" => x}, acc), do: MapSet.put(acc, x)
+
+  defp arr_write_target(%{"type" => "MemberExpression", "object" => %{"type" => "Identifier", "name" => x}, "computed" => c, "property" => p}, acc) do
+    acc = MapSet.put(acc, x)
+    if c, do: collect_arr_unsafe(p, acc), else: acc
+  end
+
+  defp arr_write_target(other, acc), do: collect_arr_unsafe(other, acc)
+
+  # an identifier object in a SAFE position contributes nothing; a non-identifier object is a normal sub-walk.
+  defp arr_skip_ident(%{"type" => "Identifier"}, acc), do: acc
+  defp arr_skip_ident(obj, acc), do: collect_arr_unsafe(obj, acc)
+
+  # an identifier object in an UNSAFE position is marked; a non-identifier is a normal sub-walk.
+  defp arr_mark_ident(%{"type" => "Identifier", "name" => n}, acc), do: MapSet.put(acc, n)
+  defp arr_mark_ident(obj, acc), do: collect_arr_unsafe(obj, acc)
 
   @fn_types ["FunctionExpression", "FunctionDeclaration", "ArrowFunctionExpression"]
 
