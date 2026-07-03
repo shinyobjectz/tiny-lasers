@@ -33,9 +33,11 @@ defmodule TinyLasers.Gate.F2GsapTest do
 
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(bin), "compiled GSAP module not confined"
 
-    # BOUNDED (memory + wall-clock) under a HOST-SAFE cap (1 GB). GSAP now peaks ~150 MB: the ticker's infinite
-    # setTimeout reschedule loop is caught by the microtask runaway-detector (@microtask_cap) before it can leak
-    # the former ~2.9 GB of {:gg_prom}/{:gg_box} entries. NODRAIN: the seek() output is synchronous.
+    # BOUNDED under a TIGHT cap (256 MB) that doubles as a regression guard: GSAP's real footprint is ~440 KB
+    # (a few tweens + eases), so this cap has ~600x headroom yet would instantly catch a return of the former
+    # setTimeout runaway (2.9 GB). That runaway is fixed at the source — setTimeout is now a real macrotask
+    # (drained for bounded event-loop turns), not a fake microtask the ticker could spin forever. NODRAIN: the
+    # seek() output is synchronous.
     ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
 
     {:completed, out} =
@@ -43,7 +45,7 @@ defmodule TinyLasers.Gate.F2GsapTest do
         Runtime.__init(ctx)
         try do apply(m, :run, []) catch :throw, _ -> :ok end
         Runtime.__output()
-      end, timeout: 120_000, max_heap_size: 134_217_728)
+      end, timeout: 120_000, max_heap_size: 33_554_432)
 
     line = Enum.find(out, &String.starts_with?(&1, marker <> "[")) || flunk("no #{marker} output")
     line |> String.replace_prefix(marker <> "[", "") |> String.replace_suffix("]", "") |> String.trim()
@@ -55,10 +57,11 @@ defmodule TinyLasers.Gate.F2GsapTest do
     assert run_lower("gsap/ease_bundle.js", "EASE_OK") == golden
   end
 
-  # UN-SKIPPED (was: peaked >4GB). Root-caused to GSAP's ticker rescheduling a fake-macrotask setTimeout
-  # (Promise.resolve().then) forever inside the end-of-program microtask drain — it looped up to the old 5M
-  # @microtask_cap, leaking ~10M {:gg_prom} + ~15M {:gg_box}. Lowering the runaway-detector cap to 250K bounds it
-  # to ~150 MB (byte-identical output is printed before the drain, so unchanged). Runs byte-identical to node.
+  # UN-SKIPPED (was: peaked >4GB, ~2.9GB retained). Root cause: GSAP's ticker rescheduled a setTimeout every
+  # tick forever, and node_shims implemented setTimeout as a fake MICROtask (Promise.resolve().then), so the
+  # end-of-program microtask drain spun it up to millions of iterations (~10M {:gg_prom} + ~15M {:gg_box}). FIX:
+  # setTimeout is now a real MACROtask (__ggMacro → a separate queue drained for bounded event-loop turns), so
+  # the ticker runs at most @macro_turns ticks. GSAP's real footprint is ~440 KB; runs byte-identical to node.
   @tag timeout: 300_000
   test "GSAP tween + timeline + stagger sample byte-identical to node (compiled, confined)" do
     golden = File.read!(Path.join(@conf, "gsap/gsap_golden.txt")) |> String.trim()

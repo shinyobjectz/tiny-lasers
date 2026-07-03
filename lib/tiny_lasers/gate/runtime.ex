@@ -1651,6 +1651,15 @@ defmodule TinyLasers.Gate.Runtime do
   def call({:globalfn, "BigInt"}, []), do: {:bigint, 0}
   def call({:globalfn, enc}, [x | _]) when enc in ["encodeURIComponent", "encodeURI"], do: URI.encode(to_str(x))
   def call({:globalfn, dec}, [x | _]) when dec in ["decodeURIComponent", "decodeURI"], do: URI.decode(to_str(x))
+  # native MACROtask defer — node_shims' setTimeout(fn) lowers to __ggMacro(fn): enqueue the callback on the
+  # macrotask queue (run by drain_microtasks' bounded event-loop turns), NOT the microtask queue. Returns a
+  # timer id (0).
+  def call({:globalfn, "__ggMacro"}, [f | _]) do
+    if match?({:fn, _}, f) or match?({:host, _}, f), do: macro_enqueue(fn -> invoke(f, :undefined, []) end)
+    0.0
+  end
+
+  def call({:globalfn, "__ggMacro"}, _), do: 0.0
   def call({:globalfn, _}, _), do: :undefined
 
   # top-level undefined/function/symbol → the VALUE undefined (String(JSON.stringify(undefined)) is "undefined");
@@ -1906,21 +1915,59 @@ defmodule TinyLasers.Gate.Runtime do
     end
   end
 
-  # Runaway-promise-loop detector. Set well above any legitimate microtask chain (rollup/svelte/preact/solid
-  # async is bounded in the thousands) but low enough that a genuinely-unbounded reschedule loop — e.g. GSAP's
-  # ticker, which reschedules a fake-macrotask setTimeout (Promise.resolve().then) forever — is caught before it
-  # leaks gigabytes of never-reclaimed {:gg_prom}/{:gg_box} entries (see f2-object-store-leak). The overflow is a
-  # guest_error the guest can catch; output printed before the end-of-program drain is unaffected. (The proper
-  # fix is real macrotask semantics so setTimeout does NOT reschedule within the microtask drain — tracked.)
-  @microtask_cap 250_000
+  # Runaway-promise-loop detector for the MICROtask queue (real Promise.then chains). Genuine async is bounded
+  # in the thousands; a truly unbounded microtask reschedule is a bug, caught as a catchable guest_error.
+  @microtask_cap 5_000_000
 
-  @doc "Drain all pending microtasks iteratively (called by the run harness after the top-level guest code)."
+  # MACROtasks (setTimeout/setImmediate) are a SEPARATE queue, drained for a bounded number of "event-loop turns"
+  # (each turn: run the macrotasks queued so far, then flush microtasks; macrotasks scheduled DURING a turn go to
+  # the next turn — real event-loop semantics). This is why setTimeout no longer reschedules inside the microtask
+  # drain: e.g. GSAP's ticker reschedules a setTimeout every tick FOREVER; with a fake-macrotask (Promise.then)
+  # that spun the microtask drain to millions of iterations (~2.9GB of {:gg_prom}/{:gg_box}). As a real macrotask
+  # it runs at most @macro_turns ticks. One turn suffices for the common finite case (Solid's setTimeout(dispose)
+  # must run after the sync render). See f2-object-store-leak.
+  @macro_turns 16
+
+  defp macro_enqueue(thunk), do: Process.put(:gg_macroq, :queue.in(thunk, Process.get(:gg_macroq, :queue.new())))
+
+  defp macro_take_all do
+    q = Process.get(:gg_macroq, :queue.new())
+    Process.put(:gg_macroq, :queue.new())
+    :queue.to_list(q)
+  end
+
+  @doc "Run the event loop after the top-level guest code: flush microtasks, then bounded macrotask turns."
   def drain_microtasks(n \\ 0)
-  def drain_microtasks(n) when n >= @microtask_cap, do: guest_error("microtask overflow — unresolved promise loop")
-  def drain_microtasks(n) do
+
+  def drain_microtasks(_n) do
+    drain_micro(0)
+    run_macro_turns(0)
+    :ok
+  end
+
+  defp drain_micro(n) when n >= @microtask_cap, do: guest_error("microtask overflow — unresolved promise loop")
+
+  defp drain_micro(n) do
     case mq_take() do
       nil -> :ok
-      thunk -> thunk.(); drain_microtasks(n + 1)
+      thunk -> thunk.(); drain_micro(n + 1)
+    end
+  end
+
+  defp run_macro_turns(t) when t >= @macro_turns, do: :ok
+
+  defp run_macro_turns(t) do
+    case macro_take_all() do
+      [] ->
+        :ok
+
+      macros ->
+        Enum.each(macros, fn thunk ->
+          (try do thunk.() catch :throw, _ -> :ok end)
+          drain_micro(0)
+        end)
+
+        run_macro_turns(t + 1)
     end
   end
 

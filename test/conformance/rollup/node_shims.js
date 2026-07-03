@@ -121,7 +121,7 @@ var util = {
 
 // ── timers: defer callbacks to a microtask so they run AFTER the current sync code (Solid SSR schedules
 // reactive-root disposal via `setTimeout(dispose)` — it must not run during render). Intervals are no-ops. ──
-var setTimeout = function(fn){ if (typeof fn === "function") Promise.resolve().then(function(){ fn(); }); return 0; };
+var setTimeout = function(fn){ if (typeof fn === "function") __ggMacro(fn); return 0; };
 var setImmediate = setTimeout;
 var clearTimeout = function(){};
 var clearImmediate = function(){};

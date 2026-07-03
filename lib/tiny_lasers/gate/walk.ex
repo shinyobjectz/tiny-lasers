@@ -23,7 +23,7 @@ defmodule TinyLasers.Gate.Walk do
               Error TypeError RangeError SyntaxError ReferenceError EvalError URIError
               Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder
               Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
-  @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt)
+  @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt __ggMacro)
 
   # ── entry ──────────────────────────────────────────────────────────────────────────────────────────────
   @doc "Interpret a parsed Program AST. `granted` maps host-capability names → cap ids (like Lower)."

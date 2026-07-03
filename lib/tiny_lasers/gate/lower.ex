@@ -2016,7 +2016,7 @@ defmodule TinyLasers.Gate.Lower do
 
   # ── helpers ──
   @globals ~w(Object Array Function Math JSON String Number Boolean Error TypeError RangeError SyntaxError ReferenceError EvalError URIError RegExp Set Map WeakSet WeakMap Symbol Promise Buffer Proxy Reflect Date TextDecoder TextEncoder Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array ArrayBuffer DataView)
-  @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt)
+  @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt __ggMacro)
 
   defp ident(n, scope) do
     cond do
