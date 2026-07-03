@@ -2900,6 +2900,15 @@ defmodule TinyLasers.Gate.Runtime do
     throw({:gg_throw, mk_error("TypeError", msg)})
   end
 
+  @doc """
+  Temporal-dead-zone guard: a `let`/`const` binding read BEFORE its declaration executes throws a ReferenceError
+  (JS semantics). Lexical bindings are hoisted to the `:gg_tdz` poison; the declaration overwrites it with the
+  real value, so a normal read (after init) passes straight through. `:gg_tdz` is not a producible guest value,
+  so this can never false-positive on real data.
+  """
+  def tdz(:gg_tdz, name), do: throw({:gg_throw, mk_error("ReferenceError", "Cannot access '#{name}' before initialization")})
+  def tdz(v, _name), do: v
+
   @doc "Guest `return` — throws to the enclosing function-body catch. Routed through the Runtime so the
   emitted guest module references no external module (keeps the 'only Runtime' confinement invariant literal)."
   def ret(v), do: throw({:gg_return, v})

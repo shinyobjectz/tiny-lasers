@@ -31,15 +31,18 @@ defmodule TinyLasers.Gate.Lower do
   def program(%{"type" => "Program", "body" => body}, granted) do
     vars = collect_vars(body) |> Enum.uniq()
     boxed = boxed_set(vars, body)
-    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}, immut_arrs: immut_arr_vars(body)}
+    lexical = collect_lexical(body) |> MapSet.new()
+    scope0 = %{locals: Enum.reduce(vars, MapSet.new(), &MapSet.put(&2, &1)), granted: granted, funcs: MapSet.new(), boxed: boxed, fnmap: %{}, immut_arrs: immut_arr_vars(body), lexical: lexical}
     {stmts, _scope} = stmts(body, scope0)
     # top-level `this` IS the global object; pre-bind hoisted vars (a boxed var gets a box — JS var hoisting).
+    # a let/const is hoisted to the :gg_tdz poison (TDZ) rather than :undefined (var).
     prelude =
       [quote(do: unquote(Macro.var(:__ggthis, __MODULE__)) = {:globalobj})] ++
         Enum.map(vars, fn v ->
+          init = if MapSet.member?(lexical, v), do: :gg_tdz, else: :undefined
           if MapSet.member?(boxed, v),
-            do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined)),
-            else: quote(do: unquote(lvar(v)) = :undefined)
+            do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(unquote(init))),
+            else: quote(do: unquote(lvar(v)) = unquote(init))
         end)
 
     # program end = end of the synchronous top-level script: run the queued promise callbacks (Walk does the
@@ -1646,6 +1649,11 @@ defmodule TinyLasers.Gate.Lower do
     thisvar = if arrow?, do: Macro.var(:__ggthis_lex_ignored, __MODULE__), else: Macro.var(:__ggthis, __MODULE__)
     # hoist this function's `var` declarations (JS function scope), pre-bound to :undefined.
     bodyvars = collect_vars(body) |> Enum.uniq() |> Enum.reject(&(&1 in names))
+    # this body's own `let`/`const` names are hoisted to the :gg_tdz poison (temporal dead zone) rather than
+    # :undefined; a param/fndecl of the same name is a real binding, so it wins over the poison. `arguments` is
+    # never poisoned — the arguments object is auto-bound and always available, even where the body also does
+    # `let arguments` (which merely re-declares the same slot; it has no dead zone for param-default reads).
+    own_lexical = MapSet.difference(MapSet.new(collect_lexical(body)), MapSet.new(["arguments" | names]))
     uses_args? = "arguments" in all_idents(body)
 
     # SMALL function bodies box their function declarations per-invocation (see stmt(FunctionDeclaration)) — a
@@ -1682,9 +1690,10 @@ defmodule TinyLasers.Gate.Lower do
     hoistq =
       fndecl_box_inits ++
         Enum.map(bodyvars, fn v ->
+          init = if MapSet.member?(own_lexical, v), do: :gg_tdz, else: :undefined
           if MapSet.member?(boxed, v),
-            do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined)),
-            else: quote(do: unquote(lvar(v)) = :undefined)
+            do: quote(do: unquote(lvar(v)) = unquote(@runtime).box(unquote(init))),
+            else: quote(do: unquote(lvar(v)) = unquote(init))
         end)
 
     argbind =
@@ -1713,6 +1722,12 @@ defmodule TinyLasers.Gate.Lower do
     # object-store-leak Lever 2: recompute the immutable-array-safe set over THIS function's own body (a
     # nested scope has its own candidates + its own uses; do not inherit the enclosing scope's set).
     bscope = Map.put(bscope, :immut_arrs, immut_arr_vars(body))
+
+    # TDZ: guard reads of THIS body's own let/const (same-scope use-before-declaration — the real test262
+    # cluster). The lexical set is deliberately NOT inherited into nested functions: an inner closure captures an
+    # outer let/const by value at closure-creation time, and real toolchains (rollup's chunk emitters) legally
+    # call such closures after the outer init has run, so inheriting the poison-guard false-positives on them.
+    bscope = Map.put(bscope, :lexical, own_lexical)
 
     # a boxed PARAM-bound name needs its box pre-created before the (possibly destructuring) bind writes it.
     param_box_inits =
@@ -2019,10 +2034,16 @@ defmodule TinyLasers.Gate.Lower do
   @global_fns ~w(parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI BigInt __ggMacro)
 
   defp ident(n, scope) do
+    lexical? = scope[:lexical] && MapSet.member?(scope.lexical, n)
+
     cond do
       # a boxed local reads through its box (shared mutable closure variable)
-      scope[:boxed] && MapSet.member?(scope.boxed, n) -> quote(do: unquote(@runtime).box_get(unquote(lvar(n))))
-      MapSet.member?(scope.locals, n) -> lvar(n)
+      scope[:boxed] && MapSet.member?(scope.boxed, n) ->
+        read = quote(do: unquote(@runtime).box_get(unquote(lvar(n))))
+        if lexical?, do: quote(do: unquote(@runtime).tdz(unquote(read), unquote(n))), else: read
+
+      MapSet.member?(scope.locals, n) ->
+        if lexical?, do: quote(do: unquote(@runtime).tdz(unquote(lvar(n)), unquote(n))), else: lvar(n)
       # numeric global constants
       n == "Infinity" and not MapSet.member?(scope.locals, n) -> :infinity
       n == "NaN" and not MapSet.member?(scope.locals, n) -> :nan
@@ -2075,6 +2096,19 @@ defmodule TinyLasers.Gate.Lower do
   defp collect_vars(%{} = node), do: node |> Map.drop(["type"]) |> Map.values() |> Enum.flat_map(&collect_vars/1)
   defp collect_vars(list) when is_list(list), do: Enum.flat_map(list, &collect_vars/1)
   defp collect_vars(_), do: []
+
+  # `let`/`const` (lexical) names in a subtree (stopping at nested function boundaries). Hoisted to the :gg_tdz
+  # poison instead of :undefined; reads are TDZ-guarded, so accessing one before its declaration executes throws
+  # a ReferenceError (JS temporal dead zone). `var` is unaffected.
+  defp collect_lexical(nil), do: []
+  defp collect_lexical(%{"type" => t}) when t in ["FunctionExpression", "FunctionDeclaration", "ArrowFunctionExpression"], do: []
+  defp collect_lexical(%{"type" => "VariableDeclaration", "kind" => kind, "declarations" => ds}) do
+    names = if kind in ["let", "const"], do: Enum.flat_map(ds, fn d -> pattern_names(d["id"]) end), else: []
+    names ++ Enum.flat_map(ds, fn d -> collect_lexical(d["init"]) end)
+  end
+  defp collect_lexical(%{} = node), do: node |> Map.drop(["type"]) |> Map.values() |> Enum.flat_map(&collect_lexical/1)
+  defp collect_lexical(list) when is_list(list), do: Enum.flat_map(list, &collect_lexical/1)
+  defp collect_lexical(_), do: []
 
   # ── closure-variable boxing analysis ──
   # names referenced INSIDE any nested function of `node` (captured variables).
