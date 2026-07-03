@@ -261,6 +261,14 @@ defmodule TinyLasers.Gate.Lower do
       else: []
   end
 
+  # GGPOSL: stamp a node's source byte around a compiled expression (finer than the per-statement stamp — the
+  # actual failing CALL inside a large statement). Read at lower time; no-op unless set.
+  defp with_pos(q, node) do
+    if System.get_env("GGPOSL") && is_map(node) && is_integer(node["start"]),
+      do: {:__block__, [], [quote(do: Process.put(:gg_pos, unquote(node["start"]))), q]},
+      else: q
+  end
+
   # ── statements ──
   defp stmt(%{"type" => "VariableDeclaration", "declarations" => ds}, scope) do
     {rev, sc} =
@@ -1114,6 +1122,10 @@ defmodule TinyLasers.Gate.Lower do
     name = key_of(m["property"])
     argq = args_of(c["arguments"], scope)
 
+    with_pos(dotted_method_call(m, c, name, argq, scope), c)
+  end
+
+  defp dotted_method_call(m, c, name, argq, scope) do
     if m["optional"] || c["optional"] do
       # optional call: `a?.m()` short-circuits on a nullish RECEIVER; `a.m?.()` additionally short-circuits
       # when the property itself is missing (the ?. guards the function, not the receiver).
@@ -1552,17 +1564,20 @@ defmodule TinyLasers.Gate.Lower do
   defp expr(%{"type" => "CallExpression"} = c, scope) do
     argq = args_of(c["arguments"], scope)
 
-    if c["optional"] do
-      # `f?.()` — a nullish function value short-circuits to undefined (args unevaluated).
-      f = Macro.var(:__ggoptfn, __MODULE__)
+    res =
+      if c["optional"] do
+        # `f?.()` — a nullish function value short-circuits to undefined (args unevaluated).
+        f = Macro.var(:__ggoptfn, __MODULE__)
 
-      quote do
-        unquote(f) = unquote(expr(c["callee"], scope))
-        if unquote(@runtime).is_nullish(unquote(f)), do: unquote(@runtime).optchain_miss(), else: unquote(@runtime).call(unquote(f), unquote(argq))
+        quote do
+          unquote(f) = unquote(expr(c["callee"], scope))
+          if unquote(@runtime).is_nullish(unquote(f)), do: unquote(@runtime).optchain_miss(), else: unquote(@runtime).call(unquote(f), unquote(argq))
+        end
+      else
+        quote(do: unquote(@runtime).call(unquote(expr(c["callee"], scope)), unquote(argq)))
       end
-    else
-      quote(do: unquote(@runtime).call(unquote(expr(c["callee"], scope)), unquote(argq)))
-    end
+
+    with_pos(res, c)
   end
 
   # a NAMED function expression binds its own name inside its body (`(function rec(n){ …rec(n-1)… })`) —
