@@ -61,6 +61,48 @@ defmodule TinyLasers.Gate.Lower do
   end
 
   @doc """
+  Like `program/2` but ARMS function-explosion and returns a complete `defmodule` BODY (the exploded chunk
+  defs + `__gg_register/0` + `run/0`). An oversized NESTED function (a bundler IIFE, a big page component)
+  splits into sibling defs instead of inlining past BEAM's 1024 Y-register limit. `run/0` keeps `program/2`'s
+  value semantics — it RETURNS the top-level program value (unlike `module_quoted/3`, whose `run` returns the
+  microtask-drain) — because only nested functions explode; the top level is lowered by `program/2` unchanged.
+  `opts[:explode] == false` yields a single non-exploding `run/0` (byte-identical to the old `program` module).
+  """
+  def program_module(ast, granted \\ %{}, opts \\ []) do
+    explode? = Keyword.get(opts, :explode, true)
+    if explode?, do: Process.put(:gg_lower_defs, []), else: Process.delete(:gg_lower_defs)
+
+    body = program(ast, granted)
+    pairs = (Process.get(:gg_lower_defs) || []) |> Enum.reverse()
+    Process.delete(:gg_lower_defs)
+
+    regs =
+      Enum.map(pairs, fn {name, _} ->
+        quote(do: unquote(@runtime).cf_reg(unquote(Atom.to_string(name)), fn env -> unquote(name)(env) end))
+      end)
+
+    register_def =
+      quote do
+        def __gg_register() do
+          unquote_splicing(regs)
+          :ok
+        end
+      end
+
+    run_def =
+      quote do
+        def run() do
+          __gg_register()
+          unquote(body)
+        end
+      end
+
+    quote do
+      unquote_splicing(Enum.map(pairs, &elem(&1, 1)) ++ [register_def, run_def])
+    end
+  end
+
+  @doc """
   Lower a Program into a complete quoted `defmodule` BODY with the top-level statements SPLIT into
   `__gg_chunk_N/0` functions chained by `run/0`. The Erlang compiler is superlinear in single-function size —
   one giant `run/0` for a 1.27MB bundle was the compile-time wall — so many small functions compile near-

@@ -329,9 +329,16 @@ defmodule TinyLasers.Gate do
     end
   end
 
-  # a local call `head(args)` — the head must be a compile-time-safe special form / operator.
+  # a local call `head(args)` — the head must be a compile-time-safe special form / operator, OR a codegen-
+  # internal explosion function (`__gg_register`/`__gg_chunk_N`/`__gg_f<id>_c<i>`). The latter are plain `def`s
+  # emitted by Lower's exploded lane (their bodies are themselves walked by this audit and call only Runtime +
+  # each other); guest code can NEVER produce such a call head — guest function calls lower to `Runtime.invoke`,
+  # and guest identifiers become `gg_`-prefixed VARIABLES, never bare local call heads. The post-compile
+  # `dangerous_refs/1` independently confirms these carry no dangerous external refs.
   defp audit_node({head, _, args}, acc) when is_atom(head) and is_list(args) do
-    if MapSet.member?(@safe_local_heads, head), do: acc, else: %{acc | bad_local: [head | acc.bad_local]}
+    if MapSet.member?(@safe_local_heads, head) or String.starts_with?(Atom.to_string(head), "__gg_"),
+      do: acc,
+      else: %{acc | bad_local: [head | acc.bad_local]}
   end
 
   defp audit_node(_node, acc), do: acc

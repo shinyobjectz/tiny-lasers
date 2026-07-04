@@ -72,4 +72,19 @@ defmodule TinyLasers.Gate.F2RegisterLimitTest do
   test "a huge GENERATOR (>1024 locals) explodes with the gen_begin/gen_end wrapper, confined + correct" do
     assert compile_run(gen_src()) == [@want]
   end
+
+  # the PRODUCTION entrypoint (Js.run → program_module) must arm explosion too — the old Lower.program path
+  # inlined every function and blew the limit. program_module keeps program's value semantics (run RETURNS the
+  # top-level value) while exploding oversized nested functions.
+  test "Js.run (production path) explodes a big nested function, stays confined, preserves value semantics" do
+    # small program: value semantics preserved (run returns the program value)
+    small = TinyLasers.Gate.Js.run("var x = 41 + 1; print(''+x); x;", caps: %{0 => %{fun: &Runtime.cap_print/2}})
+    assert small.result == {:ok, 42.0}
+    assert small.output == ["42"]
+
+    # big async fn (>1024 locals, >30KB) through Js.run: explodes, confined, correct
+    big = TinyLasers.Gate.Js.run(async_src(), caps: %{0 => %{fun: &Runtime.cap_print/2}})
+    assert big.output == [@want]
+    assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(big.binary)
+  end
 end

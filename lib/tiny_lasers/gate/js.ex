@@ -38,13 +38,13 @@ defmodule TinyLasers.Gate.Js do
     ast = parse(src)
     caps = Keyword.get(opts, :caps, default_caps())
     granted = Keyword.get(opts, :granted, default_granted())
-    body = Lower.program(ast, granted)
+    mod_body = Lower.program_module(ast, granted)
     modname = Module.concat([TinyLasers.Gate.Guest, "M#{System.unique_integer([:positive])}"])
 
     quoted =
       quote do
         defmodule unquote(modname) do
-          def run, do: unquote(body)
+          unquote(mod_body)
         end
       end
 
@@ -79,8 +79,8 @@ defmodule TinyLasers.Gate.Js do
     key_source = src <> <<0>> <> :erlang.term_to_binary(granted)
 
     compile_fun = fn modname ->
-      body = Lower.program(parse(src), granted)
-      quoted = quote do (defmodule unquote(modname) do def run, do: unquote(body) end) end
+      mod_body = Lower.program_module(parse(src), granted)
+      quoted = quote do (defmodule unquote(modname) do unquote(mod_body) end) end
       TinyLasers.Gate.assert_safe_to_compile!(quoted)
       [{mod, bin}] = Code.compile_quoted(quoted)
       {mod, bin}
