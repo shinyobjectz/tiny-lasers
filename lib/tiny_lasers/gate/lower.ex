@@ -1813,16 +1813,22 @@ defmodule TinyLasers.Gate.Lower do
     # the Erlang compiler is strongly SUPERLINEAR in single-function size (878KB body = 109s, 94KB = 0.6s), so
     # a huge plain function body EXPLODES into sibling module functions: every local is boxed (per-invocation,
     # so recursion stays correct), the handles travel as one tuple, and gg_return throws cross the chunk calls.
+    # async/generator bodies explode too (the chunks run sequentially IN THE SAME PROCESS, so the eager-await
+    # settle and the process-dict generator frame stay coherent across chunk calls) — explode_func wraps the
+    # chunk calls in the matching promise_from / gen_begin…gen_end wrapper via `explode_kind`. A huge async/gen
+    # function otherwise inlined its whole body and blew the 1024 Y-register limit.
     explode? =
-      not async? and not gen? and Process.get(:gg_lower_defs) != nil and
+      Process.get(:gg_lower_defs) != nil and
         match?(%{"type" => "BlockStatement"}, body) and
         is_integer(body["start"]) and is_integer(body["end"]) and
         body["end"] - body["start"] > @explode_min_bytes
 
+    explode_kind = cond do async? -> :async; gen? -> :gen; true -> :sync end
+
     closure_q =
       cond do
       explode? ->
-        explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, body["start"], params)
+        explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, body["start"], params, explode_kind)
       # a GENERATOR runs its body to completion eagerly, collecting yields into a frame (gen_begin/gen_end) and
       # returning the collected array — same eager model as Walk; an early `return` stops collection, its value
       # is discarded (for-of never sees it).
@@ -1907,7 +1913,7 @@ defmodule TinyLasers.Gate.Lower do
   # and N sibling module functions each running a byte-bounded slice of the statements. `return` inside a
   # slice throws gg_return, which unwinds through the slice call into the main closure's catch. Only active
   # under module_quoted (the :gg_lower_defs accumulator collects the sibling defs).
-  defp explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, fnid, params) do
+  defp explode_func(stmts_list, names, bodyvars, fndecls, uses_args?, thisvar, argvar, bscope, fnid, params, kind \\ :sync) do
     # an exploded body keeps its function declarations on the greg registry (func/6 leaves them out of boxed),
     # so they are NOT per-invocation boxes and must NOT be threaded through the env tuple — threading hundreds
     # blows BEAM's per-function register limit, and a run-once exploded body can't clobber its own greg.
@@ -2007,16 +2013,52 @@ defmodule TinyLasers.Gate.Lower do
         {quote(do: unquote(@runtime).cf(unquote(Atom.to_string(name)), unquote(envq))), sc2}
       end)
 
+    # wrap the chunk calls in the body-kind's control structure. The chunks run sequentially in this process,
+    # so an async body's eager awaits settle in order and a generator's process-dict frame (gen_begin/gen_end)
+    # brackets all chunks correctly — identical to the inline async?/gen? branches, just chunked.
+    inner =
+      case kind do
+        :async ->
+          quote do
+            unquote(@runtime).promise_from(fn ->
+              try do
+                unquote_splicing(calls)
+                :undefined
+              catch
+                :throw, {:gg_return, v} -> v
+              end
+            end)
+          end
+
+        :gen ->
+          quote do
+            unquote(@runtime).gen_begin()
+
+            try do
+              unquote_splicing(calls)
+              :undefined
+            catch
+              :throw, {:gg_return, _} -> :undefined
+            end
+
+            unquote(@runtime).gen_end()
+          end
+
+        :sync ->
+          quote do
+            try do
+              unquote_splicing(calls)
+              :undefined
+            catch
+              :throw, {:gg_return, v} -> v
+            end
+          end
+      end
+
     quote do
       unquote(@runtime).closure(fn unquote(thisvar), unquote(argvar) ->
         unquote_splicing(box_inits ++ binds ++ argbind)
-
-        try do
-          unquote_splicing(calls)
-          :undefined
-        catch
-          :throw, {:gg_return, v} -> v
-        end
+        unquote(inner)
       end)
     end
   end

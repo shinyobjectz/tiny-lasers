@@ -17,21 +17,22 @@ defmodule TinyLasers.Gate.F2RegisterLimitTest do
 
   alias TinyLasers.Gate.{Js, Lower, Runtime}
 
-  # a big sync function: >1024 distinct locals, each assigned from a call (non-constant → genuinely live),
-  # summed, and the body is well over the 30KB explosion threshold so it takes the exploded lane.
-  defp big_fn_src(n) do
-    decls = for(i <- 0..(n - 1), into: "", do: "  var v#{i} = g(#{i}); s += v#{i};\n")
-    "function g(x){ return x + 1; }\nfunction big(){\n  var s = 0;\n" <> decls <> "  return s;\n}\nprint('' + big());\n"
-  end
+  @n 1200
+  # sum of (i+1) for i in 0..n-1  ==  n*(n+1)/2
+  @want "#{div(@n * (@n + 1), 2)}"
 
-  test "a function with >1024 own-locals compiles (confined) and runs correctly on the exploded lane" do
-    n = 1200
-    src = big_fn_src(n)
+  # each variant: >1024 distinct locals, each assigned from a call (non-constant → genuinely live across the
+  # body's `try`), body well over the 30KB explosion threshold so it takes the exploded lane.
+  defp decls, do: for(i <- 0..(@n - 1), into: "", do: "  var v#{i} = g(#{i}); s += v#{i};\n")
+  defp yields, do: for(i <- 0..(@n - 1), into: "", do: "  var v#{i} = g(#{i}); yield v#{i};\n")
+
+  defp sync_src, do: "function g(x){ return x+1; }\nfunction big(){\n  var s=0;\n" <> decls() <> "  return s;\n}\nprint(''+big());\n"
+  defp async_src, do: "function g(x){ return x+1; }\nasync function big(){\n  var s=0;\n" <> decls() <> "  return s;\n}\nbig().then(function(r){ print(''+r); });\n"
+  defp gen_src, do: "function g(x){ return x+1; }\nfunction* big(){\n" <> yields() <> "}\nvar t=0; for (var x of big()) { t+=x; }\nprint(''+t);\n"
+
+  defp compile_run(src) do
     nmods = System.schedulers_online()
-
-    %{main: mainq, siblings: sibqs} =
-      Lower.modules_quoted(Js.parse(src), %{"print" => 0}, modules: nmods)
-
+    %{main: mainq, siblings: sibqs} = Lower.modules_quoted(Js.parse(src), %{"print" => 0}, modules: nmods)
     uid = System.unique_integer([:positive])
 
     mods =
@@ -57,7 +58,18 @@ defmodule TinyLasers.Gate.F2RegisterLimitTest do
         Runtime.__output()
       end, timeout: 60_000, max_heap_size: 268_435_456)
 
-    # sum of (i+1) for i in 0..n-1  ==  n*(n+1)/2
-    assert out == ["#{div(n * (n + 1), 2)}"]
+    out
+  end
+
+  test "a SYNC function with >1024 own-locals compiles (confined) and runs correctly on the exploded lane" do
+    assert compile_run(sync_src()) == [@want]
+  end
+
+  test "a huge ASYNC function (>1024 locals) explodes with the promise_from wrapper, confined + correct" do
+    assert compile_run(async_src()) == [@want]
+  end
+
+  test "a huge GENERATOR (>1024 locals) explodes with the gen_begin/gen_end wrapper, confined + correct" do
+    assert compile_run(gen_src()) == [@want]
   end
 end
