@@ -70,6 +70,79 @@ defmodule TinyLasers.Gate.F2SucraseTsTest do
     assert lower == golden, "compiled TSX transpile diverged from node golden"
   end
 
+  @tag timeout: 300_000
+  test "the 15-feature TS/TSX coverage corpus transpiles byte-identical to node, both lanes" do
+    # decorators, const enum, namespaces, import type, parameter properties, satisfies/as, non-null/optional,
+    # abstract/override, generics+keyof, type-only decls, JSX classic + automatic runtime, fragments+spread,
+    # computed enums — each transpiled by sucrase and compared to the sucrase-under-node golden.
+    golden = File.read!(Path.join(@conf, "corpus_golden.txt")) |> String.trim_trailing()
+    src = File.read!(Path.join(@conf, "corpus_bundle.js"))
+    ast = Js.parse(src)
+    ctx = %{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}}
+
+    join = fn out -> out |> Enum.join("\n") |> String.trim_trailing() end
+
+    {:completed, walk} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        try do Walk.run(ast, %{"print" => 0}) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 120_000, max_heap_size: 536_870_912)
+
+    assert join.(walk) == golden, "interpreter corpus diverged from node"
+
+    body = Lower.program(ast, %{"print" => 0})
+    mod = Module.concat([TinyLasers.Gate.Guest, "Corpus#{System.unique_integer([:positive])}"])
+    [{m, _}] = Code.compile_quoted(quote do (defmodule unquote(mod) do def run, do: unquote(body) end) end)
+
+    {:completed, lower} =
+      TinyLasers.Gate.bounded(fn ->
+        Runtime.__init(ctx)
+        try do apply(m, :run, []) catch :throw, _ -> :ok end
+        Runtime.__output()
+      end, timeout: 120_000, max_heap_size: 536_870_912)
+
+    assert join.(lower) == golden, "compiled corpus diverged from node (parameter-properties needs the destructuring-assign box fix)"
+  end
+
+  # ── destructuring ASSIGNMENT to a nested-block-mutated var must box (Lower codegen; param-properties
+  #    injection depended on it — the compiled `while` body's `lvar = …` otherwise never leaks out) ──
+  test "({a,b} = expr) inside a nested block updates the outer binding read after it, both lanes agree" do
+    both = fn src ->
+      run = fn thunk ->
+        {:completed, out} =
+          TinyLasers.Gate.bounded(fn ->
+            Runtime.__init(%{caps: %{0 => %{fun: &Runtime.cap_print/2}}, tenant_root: "/t", fs: %{}})
+            try do thunk.() catch :throw, _ -> :ok end
+            Runtime.__output()
+          end, timeout: 5_000, max_heap_size: 67_108_864)
+
+        out
+      end
+
+      w = run.(fn -> Walk.run(Js.parse(src), %{"print" => 0}) end)
+
+      l =
+        run.(fn ->
+          body = Lower.program(Js.parse(src), %{"print" => 0})
+          mod = Module.concat([TinyLasers.Gate.Guest, "DA#{System.unique_integer([:positive])}"])
+          [{m, _}] = Code.compile_quoted(quote do (defmodule unquote(mod) do def run, do: unquote(body) end) end)
+          apply(m, :run, [])
+        end)
+
+      assert w == l, "lane divergence for #{inspect(src)}: Walk=#{inspect(w)} Lower=#{inspect(l)}"
+      w
+    end
+
+    # object pattern reassigned inside a while/if, read after the loop
+    assert both.(
+             "function f(){ let a=[], b=null, i=0; while(i<3){ if(i===1){ ({a,b} = {a:[7,8],b:9}); } i++; } return a.length+','+b; } print(f());"
+           ) == ["2,9"]
+
+    # array pattern reassigned inside an if, read after
+    assert both.("function f(){ let x=0, y=0; if(true){ [x,y] = [4,5]; } return x+','+y; } print(f());") == ["4,5"]
+  end
+
   # ── the load-bearing primitive wb-9rldq turned on ──
   test "array.length = n resizes (truncate / grow-with-holes), both lanes agree" do
     both = fn src ->

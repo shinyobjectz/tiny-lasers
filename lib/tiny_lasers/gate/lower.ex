@@ -2043,6 +2043,9 @@ defmodule TinyLasers.Gate.Lower do
       case l do
         %{"type" => "Identifier", "name" => name} -> [name]
         %{"type" => "MemberExpression", "object" => %{"type" => "Identifier", "name" => name}} -> [name]
+        # destructuring ASSIGNMENT `({a, b} = …)` / `[a, b] = …` mutates every bound name — the loop-state
+        # threading + box analysis must see them, else an assignment inside a nested block is lost outside it.
+        %{"type" => t} when t in ["ObjectPattern", "ArrayPattern"] -> pattern_names(l)
         _ -> []
       end
 
@@ -2191,6 +2194,12 @@ defmodule TinyLasers.Gate.Lower do
   # names ASSIGNED anywhere (=, compound, ++/--, var-init) INCLUDING inside nested functions.
   defp all_assigned(%{"type" => "AssignmentExpression", "left" => %{"type" => "Identifier", "name" => n}} = a),
     do: [n | all_assigned(a["right"])]
+
+  # destructuring assignment `({a, b} = …)` / `[a] = …` mutates each bound name — box them if read across a
+  # block boundary (a compiled `while`/`if` body's `lvar = …` does not leak to the enclosing Elixir scope).
+  defp all_assigned(%{"type" => "AssignmentExpression", "left" => %{"type" => t} = l} = a)
+       when t in ["ObjectPattern", "ArrayPattern"],
+       do: pattern_names(l) ++ all_assigned(a["right"])
 
   defp all_assigned(%{"type" => "UpdateExpression", "argument" => %{"type" => "Identifier", "name" => n}}), do: [n]
 

@@ -1,0 +1,72 @@
+<<<interface_generic>>>
+
+function id(x) { return x; }
+const b = { v: id(3) };
+
+<<<END>>>
+<<<const_enum>>>
+var Dir; (function (Dir) { const Up = 0; Dir[Dir["Up"] = Up] = "Up"; const Down = Up + 1; Dir[Dir["Down"] = Down] = "Down"; })(Dir || (Dir = {}));
+let d = Dir.Up;
+
+<<<END>>>
+<<<namespace>>>
+
+
+<<<END>>>
+<<<import_type>>>
+"use strict";
+var _bar = require('./bar');
+const q = _bar.bar;
+
+<<<END>>>
+<<<param_props>>>
+class P { constructor( a,   b) {;this.a = a;this.b = b;} sum() { return this.a + this.b; } }
+
+<<<END>>>
+<<<satisfies_as>>>
+const cfg = { port: 8080 } ;
+const n = (cfg ).port ;
+
+<<<END>>>
+<<<nonnull_optional>>>
+ function _nullishCoalesce(lhs, rhsFn) { if (lhs != null) { return lhs; } else { return rhsFn(); } } function _optionalChain(ops) { let lastAccessLHS = undefined; let value = ops[0]; let i = 1; while (i < ops.length) { const op = ops[i]; const fn = ops[i + 1]; i += 2; if ((op === 'optionalAccess' || op === 'optionalCall') && value == null) { return undefined; } if (op === 'access' || op === 'optionalAccess') { lastAccessLHS = value; value = fn(value); } else if (op === 'call' || op === 'optionalCall') { value = fn((...args) => value.call(lastAccessLHS, ...args)); lastAccessLHS = undefined; } } return value; }function g(o) { return _nullishCoalesce(_optionalChain([o, 'access', _ => _.x, 'optionalAccess', _2 => _2.y]), () => ( 0)); }
+
+<<<END>>>
+<<<abstract_override>>>
+ class A {  }
+class B extends A {  m() {} }
+
+<<<END>>>
+<<<generics_extends>>>
+function pick(o, k) { return o[k]; }
+
+<<<END>>>
+<<<type_only_decl>>>
+
+
+const use = 5;
+
+<<<END>>>
+<<<legacy_decorator>>>
+function dec(t, k) {}
+class C {  method() {} }
+
+<<<END>>>
+<<<jsx_classic>>>
+const e = React.createElement('div', { id: "x",}, React.createElement('span', null, 1));
+
+<<<END>>>
+<<<jsx_automatic>>>
+import {jsxs as _jsxs, jsx as _jsx} from "react/jsx-runtime";const e = _jsxs('div', { id: "x", children: [_jsx('span', { children: 1}), [2,3]]});
+
+<<<END>>>
+<<<jsx_fragment_spread>>>
+const p = { a: 1 };
+const e = React.createElement(React.Fragment, null, React.createElement('div', { ...p, key: "k",} ), "text");
+
+<<<END>>>
+<<<enum_computed>>>
+var E; (function (E) { const A = 1; E[E["A"] = A] = "A"; const B = A * 2; E[E["B"] = B] = "B"; const C = 'c'.length; E[E["C"] = C] = "C"; })(E || (E = {}));
+let v = E.B;
+
+<<<END>>>
