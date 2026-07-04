@@ -1,0 +1,108 @@
+Production-readiness sheet for JS/TS execution on the tiny-lasers substrate.
+
+Verdicts are **workload-scoped**, not engine-global: a capability is "ready" when the
+real artifact runs byte-identical to native node, confined, with a committed gate test
+locking it. Spec-conformance (test262) quantifies the boundary; it is not the product
+gate. Two lanes are scored: **ASM** (Porffor→wasm→BEAM transpile — the shipping
+sandbox lane) and **F2/Gate** (JS→BEAM-native, Walk interp + Lower compiled).
+
+manifest :ready do
+  capability "typescript_transpile",
+    workload: "sucrase TS+TSX — 15-feature corpus, multi-file projects, tsconfig paths/baseUrl, .d.ts",
+    lane: "F2 both frontends, confined",
+    evidence: "TS Layers 1-5 gate tests; bundled-output execution + compile-once kit reuse proven",
+    verdict: "ready"
+
+  capability "js_bundling_rollup",
+    workload: "rollup@4.62.2 — 64-entry ES code-splitting bundle, byte-identical output (65 chunks)",
+    lane: "F2 both frontends, confined",
+    evidence: "test/gate/f2_rollup_scale_test.exs + test/conformance/rollup/",
+    verdict: "ready"
+
+  capability "react_ssr",
+    workload: "React 18 renderToString",
+    lane: "F2 both lanes, confined, zero engine fixes needed",
+    evidence: "gate rung (React 18 SSR byte-identical)",
+    verdict: "ready"
+
+  capability "preact_ssr",
+    workload: "preact@10.29.3 + preact-render-to-string@6.7.0 — hooks, context, memo",
+    lane: "F2 both lanes, Lower confined",
+    evidence: "test/gate/f2_preact_test.exs + test/conformance/preact/",
+    verdict: "ready"
+
+  capability "solid_ssr",
+    workload: "SolidJS 1.9.14 renderToString (signals/memo/For/Show), hydratable: false",
+    lane: "F2 both lanes, Lower confined",
+    evidence: "test/gate/f2_solid_test.exs",
+    verdict: "ready_with_caveat",
+    caveat: "hydration/serialization (seroval) needs Function.prototype.toString source — architectural wall; SSR render output unaffected"
+
+  capability "animation_engine_gsap",
+    workload: "GSAP 3.15 full engine — easing, tween, timeline, stagger, seek-sampled",
+    lane: "F2 Lower only (Walk correct but slow at 179KB)",
+    evidence: "test/gate/f2_gsap_test.exs",
+    verdict: "ready_with_caveat",
+    caveat: "no object-store GC yet — long-lived heavy tween loops grow memory (wb-a5tn6)"
+
+  capability "regex_engine",
+    workload: "regex corpus 42/42 + marked@4.3.0 — named groups/backrefs, lookbehind, unicode property escapes, astral",
+    lane: "ASM lane",
+    evidence: "regex corpus gate (known_gaps empty) + porffor_regex_replace",
+    verdict: "ready"
+
+  capability "number_formatting",
+    workload: "exact float formatting — shortest dtoa, toFixed, toPrecision, Dragon4 boundaries, 48/48 vs node",
+    lane: "ASM lane",
+    evidence: "test/porffor_number_corpus_test.exs (known_gaps empty)",
+    verdict: "ready"
+
+  capability "go_guests",
+    workload: "tinygo guest on the host-bridge ABI v1, byte-identical to C reference",
+    lane: "wasm host-bridge",
+    evidence: "hello-bridge reference guest",
+    verdict: "ready_reference_only"
+end
+
+manifest :not_ready do
+  capability "eval_new_function",
+    why: "AOT compiler cannot eval — preflight hard-blocks. Permanent architectural wall, not a roadmap item.",
+    verdict: "never"
+
+  capability "runtime_es_module_loading",
+    why: "module loading not wired into the single-program lane. Supported path: bundle first (rollup is ready).",
+    verdict: "workaround_exists"
+
+  capability "async_expression_position",
+    why: "await in expression position bails the async transform to blocking Porffor async.",
+    verdict: "gap"
+
+  capability "infinite_generators",
+    why: "yield in value position / unbounded generators bail eager expansion; fiber lowering covers the common shapes.",
+    verdict: "gap"
+
+  capability "function_source_reflection",
+    why: "Function.prototype.toString returns a placeholder — compiled-to-BEAM discards source. Breaks source-serializing frameworks (seroval hydration).",
+    verdict: "never"
+
+  capability "temporal_api",
+    why: "Temporal referenced but unimplemented (parse.js flags _usesTemporal).",
+    verdict: "gap"
+end
+
+manifest :isolation_posture do
+  property "execution", note: "untrusted code compiled to wasm / BEAM terms; never native"
+  property "memory", note: "BEAM-managed; per-process reclamation; structural sharing"
+  property "handles", note: "host objects are process-local handles — inert in any other process"
+  property "bounds", note: "fuel-metered (500M default in conformance), Gate.bounded wall-clock + reductions"
+  property "redteam", note: "async-fiber surface adversarially reviewed (single-active, bounded, reaped, shared-fuel, capped, unforgeable channels)"
+end
+
+baseline :spec_conformance do
+  note "test262 curated 419-case hard slice — regression tripwire, not the product gate; update after each confirmed full-slice run"
+  asm_lane_pass: 292
+  asm_lane_total: 418
+  f2_lower_pass: 178
+  f2_walk_pass: 182
+  f2_total: 418
+end
