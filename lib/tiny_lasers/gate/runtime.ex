@@ -160,6 +160,15 @@ defmodule TinyLasers.Gate.Runtime do
     {:box, id}
   end
 
+  # Per-invocation env for an EXPLODED function body: a fresh box per own-local, keyed by name. The whole
+  # env is ONE handle that threads to the chunk defs, instead of |own| simultaneously-live Elixir bindings —
+  # BEAM caps a function frame at 1024 Y-registers (stack slots), so a scope with >=1024 own-locals blew the
+  # limit when every box was materialized up front (the box_inits fan-out). Fresh per closure invocation, so
+  # recursion stays correct (each call gets its own boxes; unlike the process-global greg registry).
+  def fresh_env(names), do: Map.new(names, fn n -> {n, box(:undefined)} end)
+  @doc "Fetch one own-local's box out of a fresh_env map (routed through Runtime for the confinement gate)."
+  def env_box(env, name), do: :erlang.map_get(name, env)
+
   @doc "Read a box."
   @doc "Re-raise an already-wrapped control throw (gg_throw/gg_return/gg_break/…) after a `finally` ran —
   keeps the guest binary free of a direct :erlang.throw reference (confinement gate)."

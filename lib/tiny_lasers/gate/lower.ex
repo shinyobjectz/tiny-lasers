@@ -1925,9 +1925,20 @@ defmodule TinyLasers.Gate.Lower do
       |> Enum.sort()
 
     locals = own ++ free
+    own_set = MapSet.new(own)
     exscope = %{bscope | boxed: MapSet.union(bscope.boxed, MapSet.new(own))}
 
-    box_inits = Enum.map(own, fn v -> quote(do: unquote(lvar(v)) = unquote(@runtime).box(:undefined)) end)
+    # Own-local boxes live in ONE per-invocation env map (a single handle), NOT |own| simultaneously-live
+    # bindings — BEAM caps a frame at 1024 Y-registers, so materializing every box up front (the old
+    # box_inits fan-out) detonated a scope with >=1024 own-locals. Only the vars `binds`/`argbind` WRITE
+    # (params + `arguments`) are pre-bound to their boxes here (few); chunk calls fetch the rest by name from
+    # the env, so no single frame ever holds >=1024 live boxes. Fresh per invocation => recursion-safe.
+    fenv = Macro.var(:__gg_fenv, __MODULE__)
+    prebind = (Enum.flat_map(params, &pattern_names/1) ++ if(uses_args?, do: ["arguments"], else: [])) |> Enum.uniq()
+
+    box_inits =
+      [quote(do: unquote(fenv) = unquote(@runtime).fresh_env(unquote(own)))] ++
+        Enum.map(prebind, fn v -> quote(do: unquote(lvar(v)) = unquote(@runtime).env_box(unquote(fenv), unquote(v))) end)
 
     binds =
       params
@@ -1980,7 +1991,17 @@ defmodule TinyLasers.Gate.Lower do
           end
 
         Process.put(:gg_lower_defs, [{name, d} | Process.get(:gg_lower_defs)])
-        envq = {:{}, [], [thisq | Enum.map(chunk_locals, &lvar/1)]}
+        # own locals come from the env map (fetched inline → transiently live only for THIS call, so the
+        # closure frame never accumulates them); free locals ride from the enclosing scope as before. The
+        # chunk def's tuple pattern binds them positionally, in the SAME `chunk_locals` order.
+        env_elems =
+          Enum.map(chunk_locals, fn v ->
+            if MapSet.member?(own_set, v),
+              do: quote(do: unquote(@runtime).env_box(unquote(fenv), unquote(v))),
+              else: lvar(v)
+          end)
+
+        envq = {:{}, [], [thisq | env_elems]}
         # invoke by NAME through the cf registry: the def may land in a SIBLING module (parallel compile),
         # and callers must hold no reference to it.
         {quote(do: unquote(@runtime).cf(unquote(Atom.to_string(name)), unquote(envq))), sc2}
