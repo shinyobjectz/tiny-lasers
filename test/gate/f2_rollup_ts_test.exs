@@ -25,13 +25,14 @@ defmodule TinyLasers.Gate.F2RollupTsTest do
 
   @conf "test/conformance"
 
-  @tag timeout: 600_000
-  test "rollup + sucrase bundle a multi-file TS project byte-identical to node, confined" do
+  # bundle `driver_file` (rollup + sucrase + the driver) through F2's compiled lane, assert confined, run it
+  # under the wasm-parser bridge, and return the `marker[...]`-wrapped output line's payload.
+  defp bundle_ts(driver_file, marker) do
     prelude = File.read!(Path.join(@conf, "porffor_cjs/cjs_prelude.js")) <> "\n" <> File.read!(Path.join(@conf, "rollup/node_shims.js"))
     console = "var console = { log: function(){ print(arguments[0]); } };\n"
     bundle = File.read!(Path.join(@conf, "rollup/rollup_bundle.cjs"))
     sucrase = File.read!(Path.join(@conf, "rollup/sucrase_iife.js"))
-    driver = File.read!(Path.join(@conf, "rollup/ts_multi_driver.js"))
+    driver = File.read!(Path.join(@conf, "rollup/#{driver_file}"))
 
     src = console <> prelude <> bundle <> "\n" <> sucrase <> "\n" <> driver
     nmods = System.schedulers_online()
@@ -72,12 +73,26 @@ defmodule TinyLasers.Gate.F2RollupTsTest do
       end, timeout: 300_000, max_heap_size: 536_870_912)
 
     ok_line =
-      Enum.find(out, &String.starts_with?(&1, "TSBUNDLE_OK[")) ||
-        flunk("no TSBUNDLE_OK; output=#{inspect(Enum.map(out, &String.slice(&1, 0, 60)) |> Enum.take(8))}")
+      Enum.find(out, &String.starts_with?(&1, marker)) ||
+        flunk("no #{marker}; output=#{inspect(Enum.map(out, &String.slice(&1, 0, 60)) |> Enum.take(8))}")
 
-    code = ok_line |> String.replace_prefix("TSBUNDLE_OK[", "") |> String.replace_suffix("]", "") |> String.trim()
+    ok_line |> String.replace_prefix(marker, "") |> String.replace_suffix("]", "") |> String.trim()
+  end
+
+  @tag timeout: 600_000
+  test "rollup + sucrase bundle a multi-file TS project byte-identical to node, confined" do
+    code = bundle_ts("ts_multi_driver.js", "TSBUNDLE_OK[")
     golden = File.read!(Path.join(@conf, "rollup/ts_multi_golden.js")) |> String.trim()
-
     assert code == golden, "multi-file TS bundle diverged from node golden:\n  got=#{inspect(code)}\n  want=#{inspect(golden)}"
+  end
+
+  @tag timeout: 600_000
+  test "tsconfig paths/baseUrl + .tsx + .d.ts resolution bundles byte-identical to node, confined" do
+    # baseUrl:"src", paths:{ "@app/*":["app/*"] }; a .tsx entry importing "@app/ui/Button" (.tsx) and a
+    # type-only "@app/types" (.d.ts, erased). Proves the resolver plugin (extension probing + path aliasing)
+    # runs BEAM-native — the TS module-resolution surface for real projects.
+    code = bundle_ts("ts_paths_driver.js", "TSPATHS_OK[")
+    golden = File.read!(Path.join(@conf, "rollup/ts_paths_golden.js")) |> String.trim()
+    assert code == golden, "tsconfig-paths TS bundle diverged from node golden:\n  got=#{inspect(code)}\n  want=#{inspect(golden)}"
   end
 end
