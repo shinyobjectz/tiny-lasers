@@ -87,4 +87,32 @@ defmodule TinyLasers.Gate.F2RegisterLimitTest do
     assert big.output == [@want]
     assert %{ext: [], bifs: []} = TinyLasers.Gate.dangerous_refs(big.binary)
   end
+
+  # ── dense SINGLE EXPRESSIONS referencing >1024 vars (the deferred edge): the chunk that holds one such
+  #    expression can't pass its locals through a wide tuple, and a >1024-element object/array literal can't
+  #    build one N-wide BEAM list. Dense-chunk inline env_box + incremental literal construction close it. ──
+  defp jsrun_out(src) do
+    TinyLasers.Gate.Js.run(src, caps: %{0 => %{fun: &Runtime.cap_print/2}}).output
+  end
+
+  test "a >1024-key OBJECT literal in one expression compiles + runs (incremental oput build)" do
+    body = for(i <- 0..1199, into: "", do: "  var v#{i}=g(#{i});\n")
+    obj = 0..1199 |> Enum.map(&"k#{&1}:v#{&1}") |> Enum.join(",")
+    src = "function g(x){return x+1;}\nfunction f(){\n#{body}  return {#{obj}};\n}\nprint(''+f().k7);\n"
+    assert jsrun_out(src) == ["8"]
+  end
+
+  test "a >1024-element ARRAY literal in one expression compiles + runs (chunked aconcat build)" do
+    body = for(i <- 0..1199, into: "", do: "  var v#{i}=g(#{i});\n")
+    arr = 0..1199 |> Enum.map(&"v#{&1}") |> Enum.join(",")
+    src = "function g(x){return x+1;}\nfunction f(){\n#{body}  return [#{arr}];\n}\nprint(''+f()[7]);\n"
+    assert jsrun_out(src) == ["8"]
+  end
+
+  test "a dense >1024-term SUM expression compiles + runs (deep binop, exploded via local-count)" do
+    body = for(i <- 0..1199, into: "", do: "  var v#{i}=g(#{i});\n")
+    summ = 0..1199 |> Enum.map(&"v#{&1}") |> Enum.join("+")
+    src = "function g(x){return x+1;}\nfunction f(){\n#{body}  return #{summ};\n}\nprint(''+f());\n"
+    assert jsrun_out(src) == ["#{div(1200 * 1201, 2)}"]
+  end
 end

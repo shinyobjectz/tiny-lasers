@@ -117,6 +117,17 @@ defmodule TinyLasers.Gate.Lower do
   # (878KB compiled in 109s as ONE function; ~12KB pieces compile near-linearly).
   @explode_min_bytes 30_000
   @explode_piece_bytes 12_000
+  # above this many distinct locals in ONE chunk (a single dense expression — e.g. a >1024-key object
+  # literal — that chunk_by_bytes can't split further), pass the env MAP + inline env_box fetches instead of a
+  # wide tuple, so no frame binds them all at once. Well under 1024 to leave room for free vars + temps.
+  @dense_chunk_locals 512
+  # a function with more than this many locals explodes even if its body is under @explode_min_bytes — the
+  # 1024-register cap is a function of live-local COUNT, not source bytes. Safely under 1024.
+  @explode_min_locals 800
+  # above this many elements/props, a NON-constant array/object literal builds incrementally (one mutable
+  # container + sequential appends) instead of an N-element BEAM list literal, which would hold every value
+  # live and blow the 1024-register frame. Well under 1024; normal literals stay on the one-shot fast path.
+  @big_literal_props 256
 
   def module_quoted(ast, granted \\ %{}, opts \\ []) do
     %{main: main, siblings: []} = modules_quoted(ast, granted, Keyword.put(opts, :modules, 1))
@@ -1056,6 +1067,25 @@ defmodule TinyLasers.Gate.Lower do
           {:ok, term} = const_term(%{"type" => "ObjectExpression", "properties" => props})
           quote(do: unquote(@runtime).deep_lit(unquote(Macro.escape(term))))
 
+        # a HUGE non-constant object literal (a >1024-key generated bag) must NOT build one N-element list for
+        # cell_new — that N-wide literal holds every value live and blows BEAM's 1024-register frame. Build it
+        # incrementally: one empty cell, then `oput` each key in ORDER (cells mutate in place), so only the cell
+        # + the current value are ever live. Semantically identical for a plain data bag.
+        length(props) > @big_literal_props ->
+          tmp = Macro.var(String.to_atom("__ggobj#{System.unique_integer([:positive])}"), __MODULE__)
+
+          puts =
+            Enum.map(props, fn p ->
+              kq = if p["computed"], do: expr(p["key"], scope), else: key_of(p["key"])
+              quote(do: unquote(@runtime).oput(unquote(tmp), unquote(kq), unquote(prop_value(p, scope))))
+            end)
+
+          quote do
+            unquote(tmp) = unquote(@runtime).cell_new([])
+            unquote_splicing(puts)
+            unquote(tmp)
+          end
+
         true ->
           # fast path: a plain data-bag object → one cell_new with all key/value pairs.
           pairs =
@@ -1168,6 +1198,22 @@ defmodule TinyLasers.Gate.Lower do
               elq = Enum.map(seg, fn {e, _} -> if e, do: expr(e, scope), else: :undefined end)
               quote(do: unquote(@runtime).alit(unquote(elq)))
             end
+          end)
+
+        quote(do: unquote(@runtime).aconcat(unquote(seg_qs)))
+
+      # a HUGE mostly-non-constant array (a generated >1024-element list) can't inline one N-wide alit list —
+      # that literal holds every value live and blows the 1024-register frame. Split into <=@big_literal_props
+      # sub-arrays and aconcat them: each sub-list is bounded, and left-to-right evaluation keeps only the
+      # prior sub-array RESULTS (few) + the current segment's values live. Same hole handling as inline (nil →
+      # :undefined), so semantically identical.
+      length(els) > @big_literal_props ->
+        seg_qs =
+          els
+          |> Enum.chunk_every(@big_literal_props)
+          |> Enum.map(fn seg ->
+            elq = Enum.map(seg, fn e -> if e, do: expr(e, scope), else: :undefined end)
+            quote(do: unquote(@runtime).alit(unquote(elq)))
           end)
 
         quote(do: unquote(@runtime).aconcat(unquote(seg_qs)))
@@ -1859,11 +1905,15 @@ defmodule TinyLasers.Gate.Lower do
     # settle and the process-dict generator frame stay coherent across chunk calls) — explode_func wraps the
     # chunk calls in the matching promise_from / gen_begin…gen_end wrapper via `explode_kind`. A huge async/gen
     # function otherwise inlined its whole body and blew the 1024 Y-register limit.
+    # explode on body SIZE (>30KB, the compile-time wall) OR local COUNT (the register wall): the 1024
+    # Y-register cap is a function of how many locals are live, NOT bytes — a short but dense function (a
+    # generated >1024-local body under 30KB) blows the frame without ever tripping the byte threshold.
     explode? =
       Process.get(:gg_lower_defs) != nil and
         match?(%{"type" => "BlockStatement"}, body) and
         is_integer(body["start"]) and is_integer(body["end"]) and
-        body["end"] - body["start"] > @explode_min_bytes
+        (body["end"] - body["start"] > @explode_min_bytes or
+           length(Enum.uniq(names ++ bodyvars)) > @explode_min_locals)
 
     explode_kind = cond do async? -> :async; gen? -> :gen; true -> :sync end
 
@@ -2027,29 +2077,73 @@ defmodule TinyLasers.Gate.Lower do
         # through a box is visible to any chunk holding that handle; the pattern and the call tuple below use the
         # SAME `chunk_locals` order, so positions align.
         chunk_locals = Enum.filter(locals, &MapSet.member?(mentioned, &1))
-        pat_elems = [thisq | Enum.map(chunk_locals, &lvar/1)]
 
-        d =
-          quote do
-            def unquote(name)({unquote_splicing(pat_elems)}) do
-              _ = unquote(thisq)
-              unquote_splicing(qs)
-              :ok
-            end
+        {d, envq} =
+          if length(chunk_locals) > @dense_chunk_locals do
+            # DENSE chunk: a single huge expression (e.g. a >1024-key object literal) mentions more locals
+            # than fit in a tuple/frame. Pass the env MAP (one handle) + only the FREE locals positionally,
+            # and rewrite every own-local reference in the body to an inline env_box fetch — so no frame
+            # binds >~threshold at once. Own vars are always boxed here, so lvar(v) is only ever a box-handle
+            # VALUE (arg to box_get/box_set), never an assignment target → replacing it with env_box(cfenv,v)
+            # is sound (and semantically identical for any chunk, so the threshold only trades speed, not
+            # correctness).
+            {chunk_own, chunk_free} = Enum.split_with(chunk_locals, &MapSet.member?(own_set, &1))
+            cfenv = Macro.var(:__gg_cfenv, __MODULE__)
+            own_atoms = Map.new(chunk_own, fn v -> {String.to_atom("gg_" <> v), v} end)
+
+            qs2 =
+              Macro.postwalk(qs, fn
+                {a, _m, ctx} = node when is_atom(a) and is_atom(ctx) ->
+                  case Map.get(own_atoms, a) do
+                    nil -> node
+                    v -> quote(do: unquote(@runtime).env_box(unquote(cfenv), unquote(v)))
+                  end
+
+                node ->
+                  node
+              end)
+
+            pat = [thisq, cfenv | Enum.map(chunk_free, &lvar/1)]
+
+            d =
+              quote do
+                def unquote(name)({unquote_splicing(pat)}) do
+                  _ = unquote(thisq)
+                  _ = unquote(cfenv)
+                  unquote_splicing(qs2)
+                  :ok
+                end
+              end
+
+            envq = {:{}, [], [thisq, fenv | Enum.map(chunk_free, &lvar/1)]}
+            {d, envq}
+          else
+            pat_elems = [thisq | Enum.map(chunk_locals, &lvar/1)]
+
+            d =
+              quote do
+                def unquote(name)({unquote_splicing(pat_elems)}) do
+                  _ = unquote(thisq)
+                  unquote_splicing(qs)
+                  :ok
+                end
+              end
+
+            # own locals come from the env map (fetched inline → transiently live only for THIS call, so the
+            # closure frame never accumulates them); free locals ride from the enclosing scope as before. The
+            # chunk def's tuple pattern binds them positionally, in the SAME `chunk_locals` order.
+            env_elems =
+              Enum.map(chunk_locals, fn v ->
+                if MapSet.member?(own_set, v),
+                  do: quote(do: unquote(@runtime).env_box(unquote(fenv), unquote(v))),
+                  else: lvar(v)
+              end)
+
+            envq = {:{}, [], [thisq | env_elems]}
+            {d, envq}
           end
 
         Process.put(:gg_lower_defs, [{name, d} | Process.get(:gg_lower_defs)])
-        # own locals come from the env map (fetched inline → transiently live only for THIS call, so the
-        # closure frame never accumulates them); free locals ride from the enclosing scope as before. The
-        # chunk def's tuple pattern binds them positionally, in the SAME `chunk_locals` order.
-        env_elems =
-          Enum.map(chunk_locals, fn v ->
-            if MapSet.member?(own_set, v),
-              do: quote(do: unquote(@runtime).env_box(unquote(fenv), unquote(v))),
-              else: lvar(v)
-          end)
-
-        envq = {:{}, [], [thisq | env_elems]}
         # invoke by NAME through the cf registry: the def may land in a SIBLING module (parallel compile),
         # and callers must hold no reference to it.
         {quote(do: unquote(@runtime).cf(unquote(Atom.to_string(name)), unquote(envq))), sc2}
