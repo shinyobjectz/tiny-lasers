@@ -100,8 +100,9 @@ end
 
 baseline :spec_conformance do
   note "test262 curated 419-case hard slice — regression tripwire, not the product gate; update after each confirmed full-slice run"
-  asm_lane_pass: 292
+  asm_lane_pass: 337
   asm_lane_total: 418
+  asm_lane_pct: 80.6
   f2_lower_pass: 178
   f2_walk_pass: 182
   f2_total: 418
