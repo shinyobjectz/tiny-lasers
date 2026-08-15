@@ -54,7 +54,11 @@ defmodule TinyLasers.WasmShellTest do
     {"a 3-stage pipeline", "echo a | upper | lower", "a\n"},
     {"a for loop (shell grammar)", "for x in a b c; do echo $x; done", "a\nb\nc\n"},
     {"an if/else (shell grammar)", "if true; then echo yes; else echo no; fi", "yes\n"},
-    {"; sequencing", "echo one; echo two", "one\ntwo\n"}
+    {"; sequencing", "echo one; echo two", "one\ntwo\n"},
+    {"a block pipes its whole output onward (v0.1)",
+     "for x in a b c; do echo $x; done | upper", "A\nB\nC\n"},
+    {"an if-block pipes too (v0.1)",
+     "if true; then echo yes; echo more; fi | upper", "YES\nMORE\n"}
   ]
 
   for {label, cmd, want} <- @commands do
@@ -76,5 +80,30 @@ defmodule TinyLasers.WasmShellTest do
     assert out == "", "a redirect writes the file, not stdout (got #{inspect(out)})"
     # the bytes live in the virtual filesystem (a BEAM term), not in wasm linear memory
     assert Wasm.VFS.get("note.txt") == "persisted-by-shell\n"
+  end
+
+  test "bare paths resolve under /work (v0.1) — an agent writes what it means", %{mod: mod} do
+    Process.put(:tl_backend, :map)
+    Process.put(:tl_vfs, %{})
+
+    assert sh(mod, "echo persisted > note2.txt", false) == ""
+    assert Wasm.VFS.get("note2.txt") == "persisted\n"
+    # grep is the builtin that reads FILES (cat delegates to host coreutils),
+    # so it is the one that proves read_file's bare-path resolution.
+    assert sh(mod, "grep persisted note2.txt | upper", false) == "PERSISTED\n"
+  end
+
+  test "a HOST program rides the pipeline — grammar from C, the tool from the host", %{mod: mod} do
+    # :tl_host_dispatch is the agent shell's seam: any command the shell does
+    # not have becomes the host's to answer, mid-pipe. Here the host is a
+    # two-line Elixir wc — the same table a wasm coreutils module would ride.
+    Process.put(:tl_host_dispatch, fn
+      ["wc", "-l"], stdin -> {"#{length(String.split(stdin, "\n", trim: true))}\n", 0}
+      _argv, _stdin -> :not_host
+    end)
+
+    on_exit(fn -> Process.delete(:tl_host_dispatch) end)
+
+    assert sh(mod, "for x in a b c; do echo $x; done | wc -l", false) == "3\n"
   end
 end

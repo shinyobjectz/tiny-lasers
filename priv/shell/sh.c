@@ -9,6 +9,8 @@
  *              optional external input to the first stage). Output -> stdout.
  *
  * v0 grammar: pipelines `|`, sequencing `;`, `&&`, `||`, redirects `>`/`>>`, simple quoting.
+ * v0.1 (2026-08-15): a for/while/if block followed by `|` pipes its whole output onward, and bare
+ * paths resolve under /work (wasi-libc has no cwd, so `note.txt` could never match the preopen).
  * v0 builtins: echo cat grep head tail wc sort uniq rev tr cut nl true false  (+ upper/lower helpers).
  * Everything is intentionally small + extensible: add a builtin = one row in the dispatch table.
  */
@@ -31,9 +33,19 @@ static void bputs(Buf *b, const char *s) { bput(b, s, strlen(s)); }
 static void bputc_(Buf *b, char c) { bensure(b, 1); b->p[b->len++] = c; b->p[b->len] = 0; }
 static void bfree(Buf *b) { free(b->p); b->p = 0; b->len = b->cap = 0; }
 
-/* read a whole file from the cwd (/work) into a buffer; 0 on success */
+/* wasi-libc has no cwd, so a bare `note.txt` can never match the /work preopen — normalize every
+ * path the shell opens: absolute stays as written, bare gets the /work/ prefix. An agent writes
+ * `cat note.txt` and it means what it says. */
+static const char *norm_path(const char *path, char buf[512]) {
+  if (path[0] == '/') return path;
+  snprintf(buf, 512, "/work/%s", path);
+  return buf;
+}
+
+/* read a whole file (bare names resolve under /work) into a buffer; 0 on success */
 static int read_file(const char *path, Buf *out) {
-  int fd = open(path, O_RDONLY);
+  char nb[512];
+  int fd = open(norm_path(path, nb), O_RDONLY);
   if (fd < 0) return -1;
   char tmp[8192]; long n;
   while ((n = read(fd, tmp, sizeof tmp)) > 0) bput(out, tmp, (size_t)n);
@@ -290,9 +302,10 @@ static int lex(char *s, char **w, int max) {
 }
 
 /* run one pipeline (stages split by '|'); `extern_in` seeds the FIRST stage. Returns exit code; the
- * final stage's output is written to real stdout (or a redirect file). NO FORK — each stage runs to
- * completion and its buffer becomes the next stage's input. */
-static int run_pipeline(char *pipe_str, Buf *extern_in) {
+ * final stage's output goes to `sink` when given (a block being piped onward), else to real stdout
+ * (or a redirect file). NO FORK — each stage runs to completion and its buffer becomes the next
+ * stage's input. */
+static int run_pipeline(char *pipe_str, Buf *extern_in, Buf *sink) {
   /* split off a trailing redirect: `… > file` or `… >> file` */
   char *redir = 0; int append = 0;
   char *gt = strstr(pipe_str, ">");
@@ -328,14 +341,15 @@ static int run_pipeline(char *pipe_str, Buf *extern_in) {
     stage = strtok_r(0, "|", &save);
   }
 
-  if (redir) { int fd = open(redir, O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC), 0644); if (fd >= 0) { write(fd, cur.p, cur.len); close(fd); } }
+  if (redir) { char nb[512]; int fd = open(norm_path(redir, nb), O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC), 0644); if (fd >= 0) { write(fd, cur.p, cur.len); close(fd); } }
+  else if (sink) bput(sink, cur.p, cur.len);
   else write(1, cur.p, cur.len);
   bfree(&cur);
   return rc;
 }
 
 /* split the whole line on `;`, `&&`, `||` and run each pipeline with short-circuit semantics. */
-static int run_line(char *line, Buf *extern_in) {
+static int run_line(char *line, Buf *extern_in, Buf *sink) {
   int rc = 0; char *p = line; char last_sep = ';';   /* local: short-circuit state never leaks across calls */
   while (*p) {
     /* find the next separator */
@@ -349,7 +363,7 @@ static int run_line(char *line, Buf *extern_in) {
       int prev = rc;
       /* short-circuit: after `&&` skip if prev failed; after `||` skip if prev succeeded */
       int skip = (last_sep == '&' && prev != 0) || (last_sep == 'o' && prev == 0);
-      if (!skip) rc = run_pipeline(seg, (seg == line) ? extern_in : 0);
+      if (!skip) rc = run_pipeline(seg, (seg == line) ? extern_in : 0, sink);
       last_sep = sep;
     }
   }
@@ -357,9 +371,9 @@ static int run_line(char *line, Buf *extern_in) {
 }
 
 /* run a simple statement string: expand $VARs, then hand to run_line (which does &&/||/| + redirects) */
-static int run_simple(char *cmd, Buf *extern_in) {
+static int run_simple(char *cmd, Buf *extern_in, Buf *sink) {
   char *e = expand(cmd);
-  int rc = run_line(e, extern_in);
+  int rc = run_line(e, extern_in, sink);
   free(e);
   return rc;
 }
@@ -372,7 +386,21 @@ static int join_until(char **w, int *i, int e, Buf *out) {   /* collect words in
   return took;
 }
 
-static int run_range(char **w, int s, int e, Buf *extern_in) {
+/* a block (for/while/if) followed by `|` pipes its whole output onward: run the body into a capture
+ * buffer, then feed that as stdin to the tail pipeline (`done | wc -l`). Returns the index past the
+ * consumed tail. Declared before run_range for the mutual recursion. */
+static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink);
+
+static int block_tail(char **w, int after, int e, Buf *cap, Buf *sink, int *rc) {
+  int ti = after + 1;
+  Buf tail = {0};
+  join_until(w, &ti, e, &tail);
+  if (tail.len) *rc = run_simple(tail.p, cap, sink);
+  bfree(&tail);
+  return ti;
+}
+
+static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink) {
   int rc = 0, i = s;
   while (i < e) {
     if (!strcmp(w[i], ";")) { i++; continue; }
@@ -385,8 +413,12 @@ static int run_range(char **w, int s, int e, Buf *extern_in) {
       if (vi < e && !strcmp(w[vi], "do")) {
         int bstart = vi + 1, depth = 1, j = bstart;
         while (j < e && depth > 0) { if (!strcmp(w[j], "do")) depth++; else if (!strcmp(w[j], "done")) { if (--depth == 0) break; } j++; }
-        for (int k = 0; k < nv; k++) { char *ev = expand(vals[k]); var_set(name, ev); free(ev); rc = run_range(w, bstart, j, 0); }
-        i = j + 1;
+        int after = j + 1;
+        int piped = (after < e && !strcmp(w[after], "|"));
+        Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
+        for (int k = 0; k < nv; k++) { char *ev = expand(vals[k]); var_set(name, ev); free(ev); rc = run_range(w, bstart, j, 0, bsink); }
+        if (piped) i = block_tail(w, after, e, &cap, sink, &rc); else i = after;
+        bfree(&cap);
       } else i = vi;
       continue;
     }
@@ -398,9 +430,13 @@ static int run_range(char **w, int s, int e, Buf *extern_in) {
       if (j < e && !strcmp(w[j], "do")) {
         int bstart = j + 1, depth = 1, k = bstart;
         while (k < e && depth > 0) { if (!strcmp(w[k], "do")) depth++; else if (!strcmp(w[k], "done")) { if (--depth == 0) break; } k++; }
+        int after = k + 1;
+        int piped = (after < e && !strcmp(w[after], "|"));
+        Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
         int guard = 0;
-        while (guard++ < 1000000) { char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0); free(c); if (cr != 0) break; rc = run_range(w, bstart, k, 0); }
-        i = k + 1;
+        while (guard++ < 1000000) { char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0, 0); free(c); if (cr != 0) break; rc = run_range(w, bstart, k, 0, bsink); }
+        if (piped) i = block_tail(w, after, e, &cap, sink, &rc); else i = after;
+        bfree(&cap);
       } else i = j;
       bfree(&cond);
       continue;
@@ -419,10 +455,14 @@ static int run_range(char **w, int s, int e, Buf *extern_in) {
           k++;
         }
         if (endp < 0) endp = e;
-        char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0); free(c);
-        if (cr == 0) rc = run_range(w, tstart, elsep >= 0 ? elsep : endp, 0);
-        else if (elsep >= 0) rc = run_range(w, elsep + 1, endp, 0);
-        i = endp + 1;
+        int after = endp + 1;
+        int piped = (after < e && !strcmp(w[after], "|"));
+        Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
+        char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0, 0); free(c);
+        if (cr == 0) rc = run_range(w, tstart, elsep >= 0 ? elsep : endp, 0, bsink);
+        else if (elsep >= 0) rc = run_range(w, elsep + 1, endp, 0, bsink);
+        if (piped) i = block_tail(w, after, e, &cap, sink, &rc); else i = after;
+        bfree(&cap);
       } else i = j;
       bfree(&cond);
       continue;
@@ -435,7 +475,7 @@ static int run_range(char **w, int s, int e, Buf *extern_in) {
 
     /* simple statement: join words until ';' and run */
     Buf cmd = {0}; join_until(w, &i, e, &cmd);
-    if (cmd.len) rc = run_simple(cmd.p, extern_in);
+    if (cmd.len) rc = run_simple(cmd.p, extern_in, sink);
     extern_in = 0;
     bfree(&cmd);
   }
@@ -458,7 +498,7 @@ int main(int argc, char **argv) {
   /* lex into words + run through the grammar engine (for/if/while/vars), which falls back to run_line
    * for simple statements. The word array points INTO line.p (lex nul-terminates in place). */
   char *words[4096]; int nw = lex(line.p ? line.p : "", words, 4096);
-  int rc = run_range(words, 0, nw, &in);
+  int rc = run_range(words, 0, nw, &in, 0);
   bfree(&line); bfree(&in);
   /* WASI rejects exit codes outside [0,125] — clamp (the failure detail is in the output text). */
   if (rc < 0 || rc > 125) rc = 1;
