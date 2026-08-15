@@ -131,7 +131,7 @@ defmodule TinyLasers.Wasm.TranspileAsm do
     if funcs == [] do
       :none
     else
-      asm = {mname, exports, [], Enum.reverse(funcs), total + 1}
+      asm = asm_module(mname, exports, Enum.reverse(funcs), total + 1)
       load_module(mname, asm, map, Enum.reverse(leftover), tok)
     end
   end
@@ -208,8 +208,57 @@ defmodule TinyLasers.Wasm.TranspileAsm do
           _, _ -> :disasm_failed
         end
 
-      {_name, _exports, _attrs, funcs, _lc} = asm
+      funcs =
+        case asm do
+          {_n, _e, _a, fs, _lc} -> fs
+          {_n, _e, _a, _anno, fs, _lc} -> fs
+        end
       Process.put(:tl_asm_dumps, [{mname, funcs, disasm} | Process.get(:tl_asm_dumps, [])])
+    end
+  end
+
+  # OTP 29 (compiler 10) inserted a module-level Anno map into the beam-asm
+  # module tuple — {Mod,Exp,Attr,Anno,Fs,Lc} where every earlier OTP took
+  # {Mod,Exp,Attr,Fs,Lc} — and beam_a function_clauses on the old shape.
+  # Probed once with a real one-function module rather than a version table,
+  # so a future re-shape fails HERE, loudly, not in beam_a mid-run.
+  @doc false
+  # Public for the wb-bv4e regression test, which hand-builds a module.
+  def asm_module(mname, exports, funcs, nlabels) do
+    case asm_shape() do
+      5 -> {mname, exports, [], funcs, nlabels}
+      6 -> {mname, exports, [], %{}, funcs, nlabels}
+    end
+  end
+
+  defp asm_shape do
+    case :persistent_term.get({__MODULE__, :asm_shape}, nil) do
+      nil ->
+        probe =
+          {:tl_shape_probe, [f: 0], [],
+           [
+             {:function, :f, 0, 2,
+              [
+                {:label, 1},
+                {:func_info, {:atom, :tl_shape_probe}, {:atom, :f}, 0},
+                {:label, 2},
+                {:move, {:atom, :ok}, {:x, 0}},
+                :return
+              ]}
+           ], 3}
+
+        shape =
+          case :compile.forms(probe, @compile_opts) do
+            {:ok, _, _} -> 5
+            {:ok, _, _, _} -> 5
+            _ -> 6
+          end
+
+        :persistent_term.put({__MODULE__, :asm_shape}, shape)
+        shape
+
+      shape ->
+        shape
     end
   end
 

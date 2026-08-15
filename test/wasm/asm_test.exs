@@ -310,7 +310,7 @@ defmodule TinyLasers.WasmAsmTest do
       :return
     ]
 
-    asm = {:wb_bv4e_m, [{:f, 2}], [], [{:function, :f, 2, 2, body}], 77}
+    asm = TranspileAsm.asm_module(:wb_bv4e_m, [{:f, 2}], [{:function, :f, 2, 2, body}], 77)
 
     # Sanity: the SHAPE genuinely defeats the default (beam_jump-on) pipeline — else this test is vacuous.
     # :compile.forms returns the bare atom `error` (after printing an internal-error) on the dangling label.
