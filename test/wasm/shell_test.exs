@@ -58,7 +58,9 @@ defmodule TinyLasers.WasmShellTest do
     {"a block pipes its whole output onward (v0.1)",
      "for x in a b c; do echo $x; done | upper", "A\nB\nC\n"},
     {"an if-block pipes too (v0.1)",
-     "if true; then echo yes; echo more; fi | upper", "YES\nMORE\n"}
+     "if true; then echo yes; echo more; fi | upper", "YES\nMORE\n"},
+    {"a block redirects too (v0.1)",
+     "for x in a b; do echo $x; done > blk.txt; grep -c b blk.txt", "1\n"}
   ]
 
   for {label, cmd, want} <- @commands do

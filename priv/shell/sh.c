@@ -397,10 +397,19 @@ static int join_until(char **w, int *i, int e, Buf *out) {   /* collect words in
  * consumed tail. Declared before run_range for the mutual recursion. */
 static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink);
 
+/* does the token after `done`/`fi` continue the block — a pipe (`|`, but not `||`) or a
+ * redirect (`>`/`>>`, spaced or glued)? */
+static int block_cont(const char *w) {
+  return (w[0] == '|' && w[1] != '|') || w[0] == '>';
+}
+
 static int block_tail(char **w, int after, int e, Buf *cap, Buf *sink, int *rc) {
-  int ti = after + 1;
+  int ti = after;
   Buf tail = {0};
   join_until(w, &ti, e, &tail);
+  /* the separator token rides along: run_pipeline handles a leading `|` (strtok skips the
+   * empty stage; cap seeds the first real one) and a leading `>` (no stages; cap is what
+   * the redirect writes) — so `done | wc -l` and `done > out.txt` are the same shape here. */
   if (tail.len) *rc = run_simple(tail.p, cap, sink);
   bfree(&tail);
   return ti;
@@ -420,7 +429,7 @@ static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink) {
         int bstart = vi + 1, depth = 1, j = bstart;
         while (j < e && depth > 0) { if (!strcmp(w[j], "do")) depth++; else if (!strcmp(w[j], "done")) { if (--depth == 0) break; } j++; }
         int after = j + 1;
-        int piped = (after < e && !strcmp(w[after], "|"));
+        int piped = (after < e && block_cont(w[after]));
         Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
         for (int k = 0; k < nv; k++) { char *ev = expand(vals[k]); var_set(name, ev); free(ev); rc = run_range(w, bstart, j, 0, bsink); }
         if (piped) i = block_tail(w, after, e, &cap, sink, &rc); else i = after;
@@ -437,7 +446,7 @@ static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink) {
         int bstart = j + 1, depth = 1, k = bstart;
         while (k < e && depth > 0) { if (!strcmp(w[k], "do")) depth++; else if (!strcmp(w[k], "done")) { if (--depth == 0) break; } k++; }
         int after = k + 1;
-        int piped = (after < e && !strcmp(w[after], "|"));
+        int piped = (after < e && block_cont(w[after]));
         Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
         int guard = 0;
         while (guard++ < 1000000) { char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0, 0); free(c); if (cr != 0) break; rc = run_range(w, bstart, k, 0, bsink); }
@@ -462,7 +471,7 @@ static int run_range(char **w, int s, int e, Buf *extern_in, Buf *sink) {
         }
         if (endp < 0) endp = e;
         int after = endp + 1;
-        int piped = (after < e && !strcmp(w[after], "|"));
+        int piped = (after < e && block_cont(w[after]));
         Buf cap = {0}; Buf *bsink = piped ? &cap : sink;
         char *c = cond.p ? strdup(cond.p) : strdup("true"); int cr = run_simple(c, 0, 0); free(c);
         if (cr == 0) rc = run_range(w, tstart, elsep >= 0 ? elsep : endp, 0, bsink);
