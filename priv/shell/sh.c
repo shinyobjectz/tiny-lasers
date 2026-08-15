@@ -86,13 +86,14 @@ static const char *ci_strstr(const char *hay, const char *needle) {
   }
   return NULL;
 }
-struct grep_u { const char *pat; Buf *out; int inv; int icase; int list; const char *fname; int prefix; int *hitp; };
+struct grep_u { const char *pat; Buf *out; int inv; int icase; int list; const char *fname; int prefix; int *hitp; int count; long counted; };
 static void grep_line(const char *l, size_t n, void *u) {
   struct grep_u *g = u; char *line = strndup(l, n);
   int hit = (g->icase ? ci_strstr(line, g->pat) : strstr(line, g->pat)) != NULL;
   free(line);
   if (!(hit ^ g->inv)) return;
   if (g->hitp) *g->hitp = 1;
+  if (g->count) { g->counted++; return; }                /* -c: count, print the total at the end */
   if (g->list) return;                                   /* -l: filename printed by the caller */
   if (g->prefix && g->fname) { bputs(g->out, g->fname); bputc_(g->out, ':'); }
   bput(g->out, l, n); bputc_(g->out, '\n');
@@ -101,8 +102,9 @@ static void grep_line(const char *l, size_t n, void *u) {
 static void grep_one(const char *path, struct grep_u *base) {
   Buf f = {0};
   if (read_file(path, &f) != 0) { bfree(&f); return; }
-  int hit = 0; struct grep_u g = *base; g.fname = path; g.hitp = &hit;
+  int hit = 0; struct grep_u g = *base; g.fname = path; g.hitp = &hit; g.counted = 0;
   each_line(&f, grep_line, &g);
+  base->counted += g.counted;
   bfree(&f);
   if (base->list && hit) { bputs(base->out, path); bputc_(base->out, '\n'); }
 }
@@ -134,7 +136,7 @@ static void grep_recurse(const char *path, struct grep_u *base) {
   free(names);
 }
 static int b_grep(Ctx *c) {
-  int inv = 0, icase = 0, rec = 0, list = 0, ai = 1;
+  int inv = 0, icase = 0, rec = 0, list = 0, count = 0, ai = 1;
   /* leading option tokens; support combined forms (-ri, -rl, -iv, …) */
   while (ai < c->argc && c->argv[ai][0] == '-' && c->argv[ai][1] != '\0') {
     for (const char *p = c->argv[ai] + 1; *p; p++)
@@ -143,17 +145,21 @@ static int b_grep(Ctx *c) {
         case 'i': icase = 1; break;
         case 'r': case 'R': rec = 1; break;
         case 'l': list = 1; break;
+        case 'c': count = 1; break;
         default: break;                                  /* ignore unknown flags */
       }
     ai++;
   }
   if (ai >= c->argc) { bputs(c->out, "grep: need a pattern\n"); return 2; }
-  struct grep_u base = { c->argv[ai], c->out, inv, icase, list, NULL, 0, NULL };
+  struct grep_u base = { c->argv[ai], c->out, inv, icase, list, NULL, 0, NULL, count, 0 };
   int first_file = ai + 1, nfiles = c->argc - first_file;
-  if (nfiles <= 0) { each_line(c->in, grep_line, &base); return 0; }   /* stdin */
-  base.prefix = (nfiles > 1 || rec);                     /* prefix "path:" like real grep */
-  for (int i = first_file; i < c->argc; i++)
-    if (rec) grep_recurse(c->argv[i], &base); else grep_one(c->argv[i], &base);
+  if (nfiles <= 0) { each_line(c->in, grep_line, &base); }             /* stdin */
+  else {
+    base.prefix = (nfiles > 1 || rec) && !count;         /* prefix "path:" like real grep */
+    for (int i = first_file; i < c->argc; i++)
+      if (rec) grep_recurse(c->argv[i], &base); else grep_one(c->argv[i], &base);
+  }
+  if (count) { char t[32]; snprintf(t, sizeof t, "%ld\n", base.counted); bputs(c->out, t); }
   return 0;
 }
 struct nlim { int n, seen; Buf *out; };

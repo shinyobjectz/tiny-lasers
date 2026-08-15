@@ -82,6 +82,13 @@ defmodule TinyLasers.WasmShellTest do
     assert Wasm.VFS.get("note.txt") == "persisted-by-shell\n"
   end
 
+  test "grep -c counts matches across file args (v0.1)", %{mod: mod} do
+    Process.put(:tl_backend, :map)
+    Process.put(:tl_vfs, %{"a.txt" => "x total\ny\n", "b.txt" => "z total\n"})
+    assert sh(mod, "grep -c total a.txt b.txt", false) == "2\n"
+    assert sh(mod, "echo hay | grep -c hay", false) == "1\n"
+  end
+
   test "bare paths resolve under /work (v0.1) — an agent writes what it means", %{mod: mod} do
     Process.put(:tl_backend, :map)
     Process.put(:tl_vfs, %{})
